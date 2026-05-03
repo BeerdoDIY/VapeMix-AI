@@ -1,0 +1,182 @@
+{
+  "entities": {
+    "Recipe": {
+      "title": "Recipe",
+      "description": "A mixing recipe for e-liquid",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "servingMl": { "type": "number" },
+        "targetNicMg": { "type": "number" },
+        "targetPgRatio": { "type": "number" },
+        "nicBaseMg": { "type": "number" },
+        "nicBaseType": { "type": "string", "enum": ["PG", "VG"] },
+        "flavors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "percentage": { "type": "number" },
+              "costPerMl": { "type": "number" },
+              "notes": { "type": "string" },
+              "safetyWarnings": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "rating": { "type": "number" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" },
+        "lastMixedAt": { "type": "number" },
+        "mixCount": { "type": "number" },
+        "source": { "type": "string", "enum": ["manual", "import", "ai"] },
+        "uid": { "type": "string" }
+      },
+      "required": ["id", "name", "uid"]
+    },
+    "InventoryFlavor": {
+      "title": "InventoryFlavor",
+      "description": "A flavor in the user's stash",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "costPerMl": { "type": "number" },
+        "volumeMl": { "type": "number" },
+        "notes": { "type": "string" },
+        "safetyWarnings": { "type": "array", "items": { "type": "string" } },
+        "uid": { "type": "string" }
+      },
+      "required": ["name", "uid"]
+    },
+    "ShoppingItem": {
+      "title": "ShoppingItem",
+      "description": "An item on the user's shopping list",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "addedAt": { "type": "number" },
+        "uid": { "type": "string" }
+      },
+      "required": ["id", "name", "uid"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "User preferences and default settings",
+      "type": "object",
+      "properties": {
+        "defaultServingMl": { "type": "number" },
+        "defaultTargetNicMg": { "type": "number" },
+        "defaultTargetPgRatio": { "type": "number" },
+        "defaultNicBaseMg": { "type": "number" },
+        "defaultNicBaseType": { "type": "string", "enum": ["PG", "VG"] },
+        "uid": { "type": "string" }
+      },
+      "required": ["uid"]
+    },
+    "IngredientCost": {
+      "title": "IngredientCost",
+      "description": "Global ingredient costs",
+      "type": "object",
+      "properties": {
+        "nicCostPerMl": { "type": "number" },
+        "pgCostPerMl": { "type": "number" },
+        "vgCostPerMl": { "type": "number" },
+        "bottleCost": { "type": "number" },
+        "uid": { "type": "string" }
+      },
+      "required": ["uid"]
+    },
+    "Mix": {
+      "title": "Mix",
+      "description": "A record of a specific mixing session",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "recipeId": { "type": "string" },
+        "recipeName": { "type": "string" },
+        "mixedAt": { "type": "number" },
+        "flavors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "originalName": { "type": "string" },
+              "percentage": { "type": "number" },
+              "isSubstitution": { "type": "boolean" },
+              "notes": { "type": "string" },
+              "safetyWarnings": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "uid": { "type": "string" }
+      },
+      "required": ["id", "recipeId", "mixedAt", "uid"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "A record of a flavor order",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orderNumber": { "type": "string" },
+        "vendor": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "volumeMl": { "type": "number" },
+              "price": { "type": "number" }
+            }
+          }
+        },
+        "shippingCost": { "type": "number" },
+        "currency": { "type": "string" },
+        "totalCost": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "received"] },
+        "createdAt": { "type": "number" },
+        "receivedAt": { "type": "number" },
+        "uid": { "type": "string" }
+      },
+      "required": ["id", "uid", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}/recipes/{recipeId}": {
+      "schema": "Recipe",
+      "description": "User's mixing recipes"
+    },
+    "/users/{uid}/inventory/{flavorName}": {
+      "schema": "InventoryFlavor",
+      "description": "User's flavor stash"
+    },
+    "/users/{uid}/shoppingList/{itemId}": {
+      "schema": "ShoppingItem",
+      "description": "User's shopping list"
+    },
+    "/users/{uid}/settings/preferences": {
+      "schema": "UserSettings",
+      "description": "User's default preferences"
+    },
+    "/users/{uid}/settings/costs": {
+      "schema": "IngredientCost",
+      "description": "User's ingredient costs"
+    },
+    "/users/{uid}/mixes/{mixId}": {
+      "schema": "Mix",
+      "description": "History of mixing sessions"
+    },
+    "/users/{uid}/orders/{orderId}": {
+      "schema": "Order",
+      "description": "History of flavor orders"
+    }
+  }
+}

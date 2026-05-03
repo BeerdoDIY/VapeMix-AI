@@ -1,0 +1,109 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: /users/{uid}/recipes
+    // Document ID: recipeId
+    // Fields: id, name, category, servingMl, targetNicMg, targetPgRatio, nicBaseMg, nicBaseType, flavors, rating, notes, createdAt, updatedAt, lastMixedAt, mixCount, uid
+    //
+    // Collection: /users/{uid}/inventory
+    // Document ID: flavorName (encoded)
+    // Fields: name, costPerMl, uid
+    //
+    // Collection: /users/{uid}/shoppingList
+    // Document ID: itemId
+    // Fields: id, name, addedAt, uid
+    //
+    // Collection: /users/{uid}/settings
+    // Document ID: user_settings, costs
+    // Fields: (various numeric/string fields), uid
+    //
+    // Collection: /users/{uid}/mixes
+    // Document ID: mixId
+    // Fields: id, recipeId, recipeName, mixedAt, flavors, uid
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+    
+    function isValidRecipe(data) {
+      return data.uid == request.auth.uid;
+    }
+    
+    function isValidInventory(data) {
+      return data.uid == request.auth.uid;
+    }
+
+    function isValidShoppingItem(data) {
+      return data.uid == request.auth.uid;
+    }
+
+    function isValidSettings(data) {
+      return data.uid == request.auth.uid;
+    }
+
+    function isValidMix(data) {
+      return data.uid == request.auth.uid;
+    }
+
+    function isValidOrder(data) {
+      return data.uid == request.auth.uid;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      
+      match /recipes/{recipeId} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid) && isValidRecipe(request.resource.data);
+        allow update: if isOwner(uid) && isValidRecipe(request.resource.data);
+        allow delete: if isOwner(uid);
+      }
+      
+      match /inventory/{flavorName} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid) && isValidInventory(request.resource.data);
+        allow update: if isOwner(uid) && isValidInventory(request.resource.data);
+        allow delete: if isOwner(uid);
+      }
+      
+      match /shoppingList/{itemId} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid) && isValidShoppingItem(request.resource.data);
+        allow update: if isOwner(uid) && isValidShoppingItem(request.resource.data);
+        allow delete: if isOwner(uid);
+      }
+      
+      match /settings/{docId} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidSettings(request.resource.data);
+      }
+
+      match /mixes/{mixId} {
+        allow read, delete: if isOwner(uid);
+        allow create: if isOwner(uid) && isValidMix(request.resource.data);
+        allow update: if isOwner(uid) && isValidMix(request.resource.data);
+      }
+
+      match /orders/{orderId} {
+        allow read, delete: if isOwner(uid);
+        allow create: if isOwner(uid) && isValidOrder(request.resource.data);
+        allow update: if isOwner(uid) && isValidOrder(request.resource.data);
+      }
+    }
+  }
+}
