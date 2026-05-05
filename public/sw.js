@@ -1,4 +1,4 @@
-const CACHE_NAME = 'vapemix-v17';
+const CACHE_NAME = 'vapemix-v27';
 const ASSETS = [
   '/',
   '/index.html',

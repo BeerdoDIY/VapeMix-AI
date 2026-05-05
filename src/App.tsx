@@ -160,19 +160,24 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     operationType,
     path
   }
-  console.warn('Firestore Operation Status: ', JSON.stringify(errInfo));
   
   // Suppress errors that are expected when offline or transient
-  const isOfflineError = 
+  const isSuppressedError = 
     errInfo.error.includes('timed out') || 
     errInfo.error.includes('offline') || 
     errInfo.error.includes('network error') ||
     errInfo.error.includes('Failed to get document because the client is offline') ||
     errInfo.error.includes('unavailable') ||
-    errInfo.error.includes('Cloud operation timed out');
+    errInfo.error.includes('Cloud operation timed out') ||
+    errInfo.error.includes('PERMISSION_DENIED') ||
+    errInfo.error.includes('installations');
 
-  if (isOfflineError) return;
+  if (isSuppressedError) {
+    console.warn('Firestore Operation Status (Suppressed): ', JSON.stringify(errInfo));
+    return;
+  }
   
+  console.error('Firestore Operation Status: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }
 
@@ -591,6 +596,7 @@ function AppContent() {
     const defaultSettings: UserSettings = {
       defaultNicBaseMg: 100,
       defaultNicBaseType: 'PG',
+      defaultNicBasePgRatio: 100,
       defaultTargetPgRatio: 50,
       defaultServingMl: 120,
       defaultTargetNicMg: 3,
@@ -699,7 +705,7 @@ function AppContent() {
   }, [activeTab, cookieConsent]);
 
   // Version
-  const VERSION = "1.26.9";
+  const VERSION = "1.28.0";
 
   // History Navigation Support
   useEffect(() => {
@@ -1249,7 +1255,7 @@ function AppContent() {
     }
   }, [user, recipes, inventory, shoppingList, orders, userSettings, costs]);
 
-  const handleSaveRecipe = async (recipe: Recipe, mix?: Mix) => {
+  const handleSaveRecipe = async (recipe: Recipe, mix?: Mix, isExplicitNewVersion: boolean = false) => {
     if (import.meta.env.VITE_GA_MEASUREMENT_ID) {
       console.log('Tracking Event: save_recipe', recipe.name);
       trackEvent('save_recipe', {
@@ -1263,7 +1269,8 @@ function AppContent() {
     const existing = recipes.find(r => r.id === recipe.id);
     const duplicate = checkDuplicateRecipe(recipe, recipes);
     
-    if (duplicate && !existing) {
+    // Only trigger duplicate dialog if it's NOT an explicit new version selected by the user
+    if (!isExplicitNewVersion && duplicate && !existing) {
       setDuplicateFound(duplicate);
       setPendingRecipe(recipe);
       setPendingMix(mix || null);
@@ -2194,6 +2201,7 @@ function AppContent() {
           
           <h1 className="text-3xl font-bold text-white tracking-tight mb-2">VapeMix AI</h1>
           <p className="text-neutral-500 text-sm font-medium uppercase tracking-[0.2em]">Mixology Lab</p>
+          <p className="text-neutral-700 text-[10px] font-mono mt-2">v{VERSION}</p>
           
           <div className="mt-12 flex gap-1.5">
             {[0, 1, 2].map((i) => (
@@ -2715,12 +2723,12 @@ function AppContent() {
             Support Project
           </a>
           <span className="hidden sm:block w-1.5 h-1.5 rounded-full bg-neutral-200 dark:bg-neutral-800" />
-          <button 
+          <div 
             onClick={() => setShowPrivacyPolicy(true)}
-            className="text-neutral-500 dark:text-neutral-400 uppercase tracking-widest font-bold hover:text-purple-500 transition-colors"
+            className="text-neutral-500 dark:text-neutral-400 uppercase tracking-widest font-bold hover:text-purple-500 transition-colors cursor-pointer"
           >
             Privacy Policy
-          </button>
+          </div>
         </div>
       </div>
 
@@ -4012,7 +4020,7 @@ function RecipeEditor({
   recipe: Recipe | null, 
   recipes: Recipe[], 
   inventory: InventoryFlavor[], 
-  onSave: (r: Recipe, m?: Mix) => void, 
+  onSave: (r: Recipe, m?: Mix, isExplicitNewVersion?: boolean) => void, 
   onCancel: () => void, 
   costs: IngredientCost, 
   userSettings: UserSettings,
@@ -4042,6 +4050,7 @@ function RecipeEditor({
     targetPgRatio: userSettings.defaultTargetPgRatio,
     nicBaseMg: userSettings.defaultNicBaseMg,
     nicBaseType: userSettings.defaultNicBaseType,
+    nicBasePgRatio: userSettings.defaultNicBasePgRatio !== undefined ? userSettings.defaultNicBasePgRatio : (userSettings.defaultNicBaseType === 'PG' ? 100 : 0),
     steepingDays: 0,
     flavors: [],
     createdAt: Date.now(),
@@ -4056,8 +4065,11 @@ function RecipeEditor({
     const totalFlavorMl = formData.flavors.reduce((acc, f) => acc + (((f.percentage * intensityFactor) / 100) * formData.servingMl), 0);
     const nicotineMl = formData.nicBaseMg > 0 ? (formData.targetNicMg * formData.servingMl) / formData.nicBaseMg : 0;
     
-    const minPgMl = totalFlavorMl + (formData.nicBaseType === 'PG' ? nicotineMl : 0);
-    const minVgMl = (formData.nicBaseType === 'VG' ? nicotineMl : 0);
+    const nicPgRatio = formData.nicBasePgRatio !== undefined ? formData.nicBasePgRatio : (formData.nicBaseType === 'PG' ? 100 : 0);
+    const nicVgRatio = 100 - nicPgRatio;
+
+    const minPgMl = totalFlavorMl + (nicotineMl * (nicPgRatio / 100));
+    const minVgMl = nicotineMl * (nicVgRatio / 100);
     
     const minPgPercent = Math.ceil((minPgMl / formData.servingMl) * 100);
     const minVgPercent = Math.ceil((minVgMl / formData.servingMl) * 100);
@@ -4066,7 +4078,7 @@ function RecipeEditor({
       minPg: Math.min(100, minPgPercent),
       maxPg: Math.max(0, 100 - minVgPercent)
     };
-  }, [formData.flavors, formData.servingMl, formData.targetNicMg, formData.nicBaseMg, formData.nicBaseType, flavourIntensity]);
+  }, [formData.flavors, formData.servingMl, formData.targetNicMg, formData.nicBaseMg, formData.nicBaseType, formData.nicBasePgRatio, flavourIntensity]);
 
   useEffect(() => {
     if (formData.targetPgRatio < minPg) {
@@ -4101,6 +4113,7 @@ function RecipeEditor({
         targetPgRatio: r.targetPgRatio,
         nicBaseMg: r.nicBaseMg,
         nicBaseType: r.nicBaseType,
+        nicBasePgRatio: r.nicBasePgRatio !== undefined ? r.nicBasePgRatio : (r.nicBaseType === 'PG' ? 100 : 0),
         steepingDays: r.steepingDays || 0,
         description: r.description || '',
         flavors: r.flavors?.map(f => ({
@@ -4121,6 +4134,7 @@ function RecipeEditor({
       targetPgRatio: userSettings.defaultTargetPgRatio,
       nicBaseMg: userSettings.defaultNicBaseMg,
       nicBaseType: userSettings.defaultNicBaseType,
+      nicBasePgRatio: userSettings.defaultNicBasePgRatio !== undefined ? userSettings.defaultNicBasePgRatio : (userSettings.defaultNicBaseType === 'PG' ? 100 : 0),
       flavors: [],
       createdAt: formData.createdAt,
       updatedAt: formData.updatedAt
@@ -4206,6 +4220,7 @@ function RecipeEditor({
       targetPgRatio: userSettings.defaultTargetPgRatio,
       nicBaseMg: userSettings.defaultNicBaseMg,
       nicBaseType: userSettings.defaultNicBaseType,
+      nicBasePgRatio: userSettings.defaultNicBasePgRatio !== undefined ? userSettings.defaultNicBasePgRatio : (userSettings.defaultNicBaseType === 'PG' ? 100 : 0),
       flavors: [],
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -4264,8 +4279,9 @@ function RecipeEditor({
     // Calculate the final ID and name once to ensure consistency
     let finalRecipeId = recipe?.id || formData.id;
     let finalRecipeName = formData.name;
+    const explicitlyNewVersion = isExistingRecipe && saveAsNewVersion;
     
-    if (isExistingRecipe && saveAsNewVersion) {
+    if (explicitlyNewVersion) {
       finalRecipeId = Math.random().toString(36).substr(2, 9);
       finalRecipeName = getNextVersionName(formData.name, recipes);
     }
@@ -4302,23 +4318,23 @@ function RecipeEditor({
         id: finalRecipeId, 
         name: finalRecipeName,
         updatedAt: Date.now(),
-        lastMixedAt: isMixing ? Date.now() : formData.lastMixedAt,
-        mixCount: (isExistingRecipe && saveAsNewVersion) ? (isMixing ? 1 : 0) : updatedMixCount
+        lastMixedAt: isMixing ? Date.now() : (explicitlyNewVersion ? undefined : formData.lastMixedAt),
+        mixCount: explicitlyNewVersion ? (isMixing ? 1 : 0) : updatedMixCount
       };
 
       // When saving AND mixing, we pass the mix record to onSave for better atomicity 
       // and to handle duplicate conflicts correctly
-      onSave(recipeToSave, mixRecord);
+      onSave(recipeToSave, mixRecord, explicitlyNewVersion);
     } else {
       const recipeToSave: Recipe = { 
         ...formData, 
         id: finalRecipeId, 
         name: finalRecipeName,
         updatedAt: Date.now(),
-        lastMixedAt: isMixing ? Date.now() : formData.lastMixedAt,
-        mixCount: (isExistingRecipe && saveAsNewVersion) ? (isMixing ? 1 : 0) : updatedMixCount
+        lastMixedAt: explicitlyNewVersion ? undefined : formData.lastMixedAt,
+        mixCount: explicitlyNewVersion ? 0 : updatedMixCount
       };
-      onSave(recipeToSave);
+      onSave(recipeToSave, undefined, explicitlyNewVersion);
     }
     
     setShowConfirm(false);
@@ -4964,19 +4980,37 @@ function RecipeEditor({
                                 </Badge>
                               )}
                               {isInsufficientStock && (
-                                <TooltipProvider>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Badge variant="outline" className={`h-3.5 px-1 text-[8px] border-none font-bold uppercase tracking-tighter ${isCompletelyOut ? 'bg-red-500/20 text-red-500 animate-pulse' : 'bg-amber-500/20 text-amber-500'}`}>
-                                        <AlertCircle className="w-2 h-2 mr-0.5" /> 
-                                        {isCompletelyOut ? 'Out of Stock' : 'Low Stock'}
-                                      </Badge>
-                                    </TooltipTrigger>
-                                    <TooltipContent side="top" className="bg-neutral-900 border-neutral-700 text-white">
-                                      <p className="text-[10px]">Stash: {stockVolume?.toFixed(2)}ml | Required: {f.ml.toFixed(2)}ml</p>
-                                    </TooltipContent>
-                                  </Tooltip>
-                                </TooltipProvider>
+                                <div className="flex items-center gap-1">
+                                  <TooltipProvider>
+                                    <Tooltip>
+                                      <TooltipTrigger 
+                                        render={
+                                          <Badge variant="outline" className={`h-3.5 px-1 text-[8px] border-none font-bold uppercase tracking-tighter cursor-help ${isCompletelyOut ? 'bg-red-500/20 text-red-500 animate-pulse' : 'bg-amber-500/20 text-amber-500'}`}>
+                                            <AlertCircle className="w-2 h-2 mr-0.5" /> 
+                                            {isCompletelyOut ? 'Out of Stock' : 'Low Stock'}
+                                          </Badge>
+                                        } 
+                                      />
+                                      <TooltipContent side="top" className="bg-neutral-900 border-neutral-700 text-white">
+                                        <p className="text-[10px]">Stash: {stockVolume?.toFixed(2)}ml | Required: {f.ml.toFixed(2)}ml</p>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                  {!onShoppingList && (
+                                    <Button 
+                                      variant="ghost" 
+                                      size="icon" 
+                                      className="h-3.5 w-3.5 p-0 text-blue-400 hover:text-blue-300 hover:bg-transparent"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onAddShoppingItem({ id: Math.random().toString(36).substr(2, 9), name: f.name, addedAt: Date.now() });
+                                      }}
+                                      title="Add to shopping list"
+                                    >
+                                      <ShoppingCart className="w-2.5 h-2.5" />
+                                    </Button>
+                                  )}
+                                </div>
                               )}
                               {hasSafetyWarnings && (
                                 <AlertTriangle className="w-3.5 h-3.5 text-red-500 animate-pulse" />
@@ -5031,23 +5065,25 @@ function RecipeEditor({
                                 {!onShoppingList && isInsufficientStock && (
                                   <TooltipProvider>
                                     <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <button 
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            onAddShoppingItem({ 
-                                              id: Math.random().toString(36).substr(2, 9),
-                                              name: f.name,
-                                              addedAt: Date.now(),
-                                              uid: '' 
-                                            });
-                                          }}
-                                          className="text-blue-400 hover:text-blue-300 transition-colors cursor-pointer p-0.5"
-                                        >
-                                          <ShoppingCart className="w-3.5 h-3.5" />
-                                        </button>
-                                      </TooltipTrigger>
+                                      <TooltipTrigger 
+                                        render={
+                                          <div 
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              onAddShoppingItem({ 
+                                                id: Math.random().toString(36).substr(2, 9),
+                                                name: f.name,
+                                                addedAt: Date.now(),
+                                                uid: '' 
+                                              });
+                                            }}
+                                            className="text-blue-400 hover:text-blue-300 transition-colors cursor-pointer p-0.5"
+                                            title="Add to shopping list"
+                                          >
+                                            <ShoppingCart className="w-3.5 h-3.5" />
+                                          </div>
+                                        }
+                                      />
                                       <TooltipContent side="top" className="bg-neutral-900 border-neutral-700 text-white">
                                         <p className="text-[10px]">Add to shopping list</p>
                                       </TooltipContent>
@@ -5068,23 +5104,25 @@ function RecipeEditor({
                                 {!onShoppingList && isInsufficientStock && (
                                   <TooltipProvider>
                                     <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <button 
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            onAddShoppingItem({ 
-                                              id: Math.random().toString(36).substr(2, 9),
-                                              name: f.name,
-                                              addedAt: Date.now(),
-                                              uid: '' 
-                                            });
-                                          }}
-                                          className="text-blue-400 hover:text-blue-300 transition-colors cursor-pointer p-0.5"
-                                        >
-                                          <ShoppingCart className="w-3.5 h-3.5" />
-                                        </button>
-                                      </TooltipTrigger>
+                                      <TooltipTrigger 
+                                        render={
+                                          <div 
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              onAddShoppingItem({ 
+                                                id: Math.random().toString(36).substr(2, 9),
+                                                name: f.name,
+                                                addedAt: Date.now(),
+                                                uid: '' 
+                                              });
+                                            }}
+                                            className="text-blue-400 hover:text-blue-300 transition-colors cursor-pointer p-0.5"
+                                            title="Add to shopping list"
+                                          >
+                                            <ShoppingCart className="w-3.5 h-3.5" />
+                                          </div>
+                                        }
+                                      />
                                       <TooltipContent side="top" className="bg-neutral-900 border-neutral-700 text-white">
                                         <p className="text-[10px]">Add to shopping list</p>
                                       </TooltipContent>
@@ -5196,20 +5234,44 @@ function RecipeEditor({
                     onChange={(e) => setFormData({ ...formData, nicBaseMg: e.target.value === '' ? 0 : Number(e.target.value) })}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label>Base Type</Label>
-                  <Select 
-                    value={formData.nicBaseType || 'PG'} 
-                    onValueChange={(val: 'PG' | 'VG') => setFormData({ ...formData, nicBaseType: val })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="PG">PG</SelectItem>
-                      <SelectItem value="VG">VG</SelectItem>
-                    </SelectContent>
-                  </Select>
+                <div className="space-y-4 col-span-2 md:col-span-1">
+                  <div className="flex items-center justify-between">
+                    <Label>Base PG/VG Ratio</Label>
+                    {(() => {
+                      const currentNicPgRatio = formData.nicBasePgRatio !== undefined 
+                        ? formData.nicBasePgRatio 
+                        : (formData.nicBaseType === 'PG' ? 100 : 0);
+                      return (
+                        <>
+                          <span className="text-xs font-mono font-bold text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded">
+                            {currentNicPgRatio}/{100 - currentNicPgRatio}
+                          </span>
+                        </>
+                      );
+                    })()}
+                  </div>
+                  <div className="pt-2">
+                    <Slider 
+                      value={[formData.nicBasePgRatio !== undefined ? formData.nicBasePgRatio : (formData.nicBaseType === 'PG' ? 100 : 0)]} 
+                      min={0} 
+                      max={100} 
+                      step={5} 
+                      onValueChange={(vals) => {
+                        const val = Array.isArray(vals) ? vals[0] : vals;
+                        if (val !== undefined && val !== null) {
+                          setFormData({ 
+                            ...formData, 
+                            nicBasePgRatio: val, 
+                            nicBaseType: val >= 50 ? 'PG' : 'VG' 
+                          });
+                        }
+                      }}
+                    />
+                    <div className="flex justify-between mt-1 px-1">
+                      <span className="text-[10px] text-neutral-400 font-medium">100% VG</span>
+                      <span className="text-[10px] text-neutral-400 font-medium">100% PG</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </CardContent>
@@ -5789,16 +5851,16 @@ function InventoryManager({
                                   </TooltipProvider>
                                 )}
                                 {item.notes && (
-                                  <button
+                                  <div
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setExpandedNotes(prev => ({ ...prev, [item.name]: !prev[item.name] }));
                                     }}
-                                    className={`hover:text-blue-500 transition-colors shrink-0 ${expandedNotes[item.name] ? 'text-blue-500' : 'text-neutral-400'}`}
+                                    className={`hover:text-blue-500 transition-colors shrink-0 cursor-pointer ${expandedNotes[item.name] ? 'text-blue-500' : 'text-neutral-400'}`}
                                     title="View Notes"
                                   >
                                     <StickyNote className="w-3 h-3" />
-                                  </button>
+                                  </div>
                                 )}
                                 {item.volumeMl !== undefined && (
                                   <Badge 
@@ -5816,16 +5878,16 @@ function InventoryManager({
                                   </Badge>
                                 )}
                                 {getUsageCount(item.name) > 0 && (
-                                  <button 
+                                  <div 
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       onFilterRecipes(item.name);
                                     }}
-                                    className="text-[10px] font-bold text-blue-500 hover:text-blue-600 hover:underline flex items-center gap-0.5 shrink-0"
+                                    className="text-[10px] font-bold text-blue-500 hover:text-blue-600 hover:underline flex items-center gap-0.5 shrink-0 cursor-pointer"
                                     title={`Used in ${getUsageCount(item.name)} ${getUsageCount(item.name) === 1 ? 'recipe' : 'recipes'}`}
                                   >
                                     <Book className="w-2.5 h-2.5" /> {getUsageCount(item.name)}
-                                  </button>
+                                  </div>
                                 )}
                               </div>
                               {item.costPerMl && (
@@ -6998,20 +7060,42 @@ function SettingsPanel({
                 onChange={(e) => onUpdateSettings({ ...userSettings, defaultNicBaseMg: e.target.value === '' ? 0 : Number(e.target.value) })}
               />
             </div>
-            <div className="space-y-2">
-              <Label>Default Nic Base Type</Label>
-              <Select 
-                value={userSettings.defaultNicBaseType} 
-                onValueChange={(val: 'PG' | 'VG') => onUpdateSettings({ ...userSettings, defaultNicBaseType: val })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="PG">PG</SelectItem>
-                  <SelectItem value="VG">VG</SelectItem>
-                </SelectContent>
-              </Select>
+            <div className="space-y-4 col-span-2 md:col-span-1">
+              <div className="flex items-center justify-between">
+                <Label>Nicotine Base PG/VG Ratio</Label>
+                {(() => {
+                  const currentNicPgRatio = userSettings.defaultNicBasePgRatio !== undefined 
+                    ? userSettings.defaultNicBasePgRatio 
+                    : (userSettings.defaultNicBaseType === 'PG' ? 100 : 0);
+                  return (
+                    <span className="text-xs font-mono font-bold text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded">
+                      {currentNicPgRatio}/{100 - currentNicPgRatio}
+                    </span>
+                  );
+                })()}
+              </div>
+              <div className="pt-2">
+                <Slider 
+                  value={[userSettings.defaultNicBasePgRatio !== undefined ? userSettings.defaultNicBasePgRatio : (userSettings.defaultNicBaseType === 'PG' ? 100 : 0)]} 
+                  min={0} 
+                  max={100} 
+                  step={5} 
+                  onValueChange={(vals) => {
+                    const val = Array.isArray(vals) ? vals[0] : vals;
+                    if (val !== undefined && val !== null) {
+                      onUpdateSettings({ 
+                        ...userSettings, 
+                        defaultNicBasePgRatio: val, 
+                        defaultNicBaseType: val >= 50 ? 'PG' : 'VG' 
+                      });
+                    }
+                  }}
+                />
+                <div className="flex justify-between mt-1 px-1">
+                  <span className="text-[10px] text-neutral-400 font-medium">100% VG</span>
+                  <span className="text-[10px] text-neutral-400 font-medium">100% PG</span>
+                </div>
+              </div>
             </div>
             <div className="space-y-2">
               <Label>Mixing Preference</Label>

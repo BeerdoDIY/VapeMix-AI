@@ -2,54 +2,54 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // ===============================================================
-    // Assumed Data Model
-    // ===============================================================
-    //
-    // Collection: /users/{uid}/recipes
-    // Document ID: recipeId
-    // Fields: id, name, category, servingMl, targetNicMg, targetPgRatio, nicBaseMg, nicBaseType, flavors, rating, notes, createdAt, updatedAt, lastMixedAt, mixCount, uid
-    //
-    // Collection: /users/{uid}/inventory
-    // Document ID: flavorName (encoded)
-    // Fields: name, costPerMl, uid
-    //
-    // Collection: /users/{uid}/shoppingList
-    // Document ID: itemId
-    // Fields: id, name, addedAt, uid
-    //
-    // Collection: /users/{uid}/settings
-    // Document ID: user_settings, costs
-    // Fields: (various numeric/string fields), uid
-    //
-    // Collection: /users/{uid}/mixes
-    // Document ID: mixId
-    // Fields: id, recipeId, recipeName, mixedAt, flavors, uid
-    //
-    // ===============================================================
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
 
     // ===============================================================
     // Helper Functions
     // ===============================================================
-    
-    function isAuthenticated() {
+
+    function isSignedIn() {
       return request.auth != null;
     }
-    
+
     function isOwner(uid) {
-      return isAuthenticated() && request.auth.uid == uid;
+      return isSignedIn() && request.auth.uid == uid;
     }
-    
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // ===============================================================
+    // Validation Blueprints
+    // ===============================================================
+
     function isValidRecipe(data) {
-      return data.uid == request.auth.uid;
+      return data.uid == request.auth.uid &&
+             data.id is string &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100;
     }
-    
+
     function isValidInventory(data) {
-      return data.uid == request.auth.uid;
+      return data.uid == request.auth.uid &&
+             data.name is string && data.name.size() > 0;
     }
 
     function isValidShoppingItem(data) {
-      return data.uid == request.auth.uid;
+      return data.uid == request.auth.uid &&
+             data.id is string &&
+             data.name is string && data.name.size() > 0;
     }
 
     function isValidSettings(data) {
@@ -57,52 +57,68 @@ service cloud.firestore {
     }
 
     function isValidMix(data) {
-      return data.uid == request.auth.uid;
+      return data.uid == request.auth.uid &&
+             data.id is string &&
+             data.recipeId is string;
     }
 
     function isValidOrder(data) {
-      return data.uid == request.auth.uid;
+      return data.uid == request.auth.uid &&
+             data.id is string &&
+             data.status in ['pending', 'received'];
+    }
+
+    // ===============================================================
+    // Collection Paths
+    // ===============================================================
+
+    // Path for connection testing - PUBLIC READ to avoid errors on boot
+    match /test/{docId} {
+      allow read: if true;
     }
 
     match /users/{uid} {
+      // User profile potentially readable by owner
       allow read: if isOwner(uid);
-      
+
       match /recipes/{recipeId} {
         allow read: if isOwner(uid);
-        allow create: if isOwner(uid) && isValidRecipe(request.resource.data);
-        allow update: if isOwner(uid) && isValidRecipe(request.resource.data);
+        allow create: if isOwner(uid) && isValidRecipe(incoming()) 
+                      && incoming().keys().hasAll(['id', 'name', 'uid'])
+                      && incoming().keys().size() >= 3;
+        allow update: if isOwner(uid) && isValidRecipe(incoming())
+                      && incoming().uid == existing().uid;
         allow delete: if isOwner(uid);
       }
-      
+
       match /inventory/{flavorName} {
         allow read: if isOwner(uid);
-        allow create: if isOwner(uid) && isValidInventory(request.resource.data);
-        allow update: if isOwner(uid) && isValidInventory(request.resource.data);
+        allow create, update: if isOwner(uid) && isValidInventory(incoming());
         allow delete: if isOwner(uid);
       }
-      
+
       match /shoppingList/{itemId} {
         allow read: if isOwner(uid);
-        allow create: if isOwner(uid) && isValidShoppingItem(request.resource.data);
-        allow update: if isOwner(uid) && isValidShoppingItem(request.resource.data);
+        allow create, update: if isOwner(uid) && isValidShoppingItem(incoming());
         allow delete: if isOwner(uid);
       }
-      
+
       match /settings/{docId} {
-        allow read, delete: if isOwner(uid);
-        allow create, update: if isOwner(uid) && isValidSettings(request.resource.data);
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidSettings(incoming());
+        allow delete: if isOwner(uid);
       }
 
       match /mixes/{mixId} {
-        allow read, delete: if isOwner(uid);
-        allow create: if isOwner(uid) && isValidMix(request.resource.data);
-        allow update: if isOwner(uid) && isValidMix(request.resource.data);
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidMix(incoming());
+        allow delete: if isOwner(uid);
       }
 
       match /orders/{orderId} {
-        allow read, delete: if isOwner(uid);
-        allow create: if isOwner(uid) && isValidOrder(request.resource.data);
-        allow update: if isOwner(uid) && isValidOrder(request.resource.data);
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidOrder(incoming());
+        allow delete: if isOwner(uid);
       }
     }
   }

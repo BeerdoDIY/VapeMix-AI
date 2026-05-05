@@ -8,14 +8,21 @@ export function calculateRecipe(
   costs: IngredientCost, 
   densities?: { pg?: number, vg?: number }
 ): CalculationResult {
-  const { servingMl, targetNicMg, targetPgRatio, nicBaseMg, nicBaseType, flavors } = recipe;
+  const { servingMl, targetNicMg, targetPgRatio, nicBaseMg, nicBaseType, nicBasePgRatio, flavors } = recipe;
   
   const pgDensity = densities?.pg || DEFAULT_DENSITY_PG;
   const vgDensity = densities?.vg || DEFAULT_DENSITY_VG;
 
+  // Determine nicotine base PG/VG ratio (normalize to 0-100)
+  const nicPgRatio = nicBasePgRatio !== undefined ? nicBasePgRatio : (nicBaseType === 'PG' ? 100 : 0);
+  const nicVgRatio = 100 - nicPgRatio;
+
   // 1. Nicotine calculation
-  const nicotineMl = (targetNicMg * servingMl) / nicBaseMg;
-  const nicotineGrams = nicotineMl * (nicBaseType === 'VG' ? vgDensity : pgDensity);
+  const nicotineMl = nicBaseMg > 0 ? (targetNicMg * servingMl) / nicBaseMg : 0;
+  
+  // Calculate nicotine base specific gravity
+  const nicotineBaseDensity = (nicPgRatio / 100 * pgDensity) + (nicVgRatio / 100 * vgDensity);
+  const nicotineGrams = nicotineMl * nicotineBaseDensity;
 
   // 2. Flavor calculations (assuming flavors are PG-based)
   const flavorResults = flavors.map(f => {
@@ -24,7 +31,7 @@ export function calculateRecipe(
       id: f.id,
       name: f.name,
       ml,
-      grams: ml * pgDensity,
+      grams: ml * pgDensity, // Assuming flavors are PG-based
       percentage: f.percentage
     };
   });
@@ -42,12 +49,12 @@ export function calculateRecipe(
   // Subtract flavors from PG (assuming flavors are PG-based)
   actualPgMl -= totalFlavorMl;
 
-  // Subtract nicotine from its base type
-  if (nicBaseType === 'PG') {
-    actualPgMl -= nicotineMl;
-  } else {
-    actualVgMl -= nicotineMl;
-  }
+  // Subtract nicotine portions based on its PG/VG ratio
+  const nicotinePgContribution = nicotineMl * (nicPgRatio / 100);
+  const nicotineVgContribution = nicotineMl * (nicVgRatio / 100);
+  
+  actualPgMl -= nicotinePgContribution;
+  actualVgMl -= nicotineVgContribution;
 
   // Ensure no negative values
   actualPgMl = Math.max(0, actualPgMl);

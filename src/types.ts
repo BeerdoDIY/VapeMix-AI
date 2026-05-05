@@ -18,6 +18,7 @@ export interface Recipe {
   targetPgRatio: number; // e.g., 40 for 40/60 PG/VG
   nicBaseMg: number;
   nicBaseType: 'PG' | 'VG';
+  nicBasePgRatio?: number; // 0 to 100
   flavors: Flavor[];
   createdAt: number;
   updatedAt: number;
@@ -59,6 +60,7 @@ export interface IngredientCost {
 export interface UserSettings {
   defaultNicBaseMg: number;
   defaultNicBaseType: 'PG' | 'VG';
+  defaultNicBasePgRatio?: number; // 0 to 100
   defaultTargetPgRatio: number;
   defaultServingMl: number;
   defaultTargetNicMg: number;

@@ -147,9 +147,22 @@
         "uid": { "type": "string" }
       },
       "required": ["id", "uid", "status", "createdAt"]
+    },
+    "TestConnection": {
+      "title": "TestConnection",
+      "description": "A dummy document for connection testing",
+      "type": "object",
+      "properties": {
+        "status": { "type": "string" }
+      },
+      "required": ["status"]
     }
   },
   "firestore": {
+    "/test/{docId}": {
+      "schema": "TestConnection",
+      "description": "Dummy collection for testing connectivity"
+    },
     "/users/{uid}/recipes/{recipeId}": {
       "schema": "Recipe",
       "description": "User's mixing recipes"
