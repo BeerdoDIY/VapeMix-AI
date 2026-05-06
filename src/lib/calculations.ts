@@ -24,14 +24,14 @@ export function calculateRecipe(
   const nicotineBaseDensity = (nicPgRatio / 100 * pgDensity) + (nicVgRatio / 100 * vgDensity);
   const nicotineGrams = nicotineMl * nicotineBaseDensity;
 
-  // 2. Flavor calculations (assuming flavors are PG-based)
+  // 2. Flavour calculations (assuming flavours are PG-based)
   const flavorResults = flavors.map(f => {
     const ml = (f.percentage / 100) * servingMl;
     return {
       id: f.id,
       name: f.name,
       ml,
-      grams: ml * pgDensity, // Assuming flavors are PG-based
+      grams: ml * pgDensity, // Assuming flavours are PG-based
       percentage: f.percentage
     };
   });
@@ -46,7 +46,7 @@ export function calculateRecipe(
   let actualPgMl = targetPgMl;
   let actualVgMl = targetVgMl;
 
-  // Subtract flavors from PG (assuming flavors are PG-based)
+  // Subtract flavours from PG (assuming flavours are PG-based)
   actualPgMl -= totalFlavorMl;
 
   // Subtract nicotine portions based on its PG/VG ratio

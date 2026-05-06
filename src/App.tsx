@@ -213,9 +213,7 @@ function isFlavorMatch(name1: string, name2: string): boolean {
     // Expand common abbreviations/names
     const expansions: Record<string, string> = {
       'the flavor apprentice': 'tpa',
-      'the flavours apprentice': 'tpa',
       'tfa': 'tpa',
-      'capella flavors': 'cap',
       'capella': 'cap',
       'flavourart': 'fa',
       'flavour art': 'fa',
@@ -707,7 +705,7 @@ function AppContent() {
   }, [activeTab, cookieConsent]);
 
   // Version
-  const VERSION = "1.29.1";
+  const VERSION = "1.29.3";
 
   // History Navigation Support
   useEffect(() => {
@@ -1736,6 +1734,15 @@ function AppContent() {
       if (!confirmed) return;
     }
 
+    // Update local state immediately for snappy UI
+    setInventory(prev => {
+      const newInv = prev.filter(i => i.name !== name);
+      if (!user) {
+        localStorage.setItem('vape-inventory-v2', JSON.stringify(newInv));
+      }
+      return newInv;
+    });
+
     if (user) {
       const uid = user.uid;
       const docId = name.replace(/\//g, '_');
@@ -1743,13 +1750,8 @@ function AppContent() {
         await withTimeout(deleteDoc(doc(db, 'users', uid, 'inventory', docId)));
       } catch (err) {
         handleFirestoreError(err, OperationType.DELETE, `users/${uid}/inventory/${name}`);
+        // If it fails, onSnapshot might put it back, but that's expected for consistency
       }
-    } else {
-      setInventory(prev => {
-        const newInv = prev.filter(i => i.name !== name);
-        localStorage.setItem('vape-inventory-v2', JSON.stringify(newInv));
-        return newInv;
-      });
     }
   };
 
@@ -1766,7 +1768,7 @@ function AppContent() {
             <div>
               <h4 className="font-bold text-sm text-neutral-900 dark:text-neutral-100">{name} is empty!</h4>
               <p className="text-[10px] text-neutral-500 dark:text-neutral-400 font-medium">
-                {isOnShoppingList ? "Already on shopping list" : "Auto-detected during depletion"}
+                {isOnShoppingList ? `Already on shopping list` : `Auto-detected during depletion`}
               </p>
             </div>
           </div>
@@ -1828,6 +1830,15 @@ function AppContent() {
       promptForDepletedFlavor(item.name);
     }
 
+    // Update local state immediately for snappy UI
+    setInventory(prev => {
+      const newInv = prev.map(i => i.name === oldName ? item : i);
+      if (!user) {
+        localStorage.setItem('vape-inventory-v2', JSON.stringify(newInv));
+      }
+      return newInv;
+    });
+
     if (user) {
       const uid = user.uid;
       const batch = writeBatch(db);
@@ -1846,12 +1857,6 @@ function AppContent() {
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, `users/${uid}/inventory`);
       }
-    } else {
-      setInventory(prev => {
-        const newInv = prev.map(i => i.name === oldName ? item : i);
-        localStorage.setItem('vape-inventory-v2', JSON.stringify(newInv));
-        return newInv;
-      });
     }
   };
 
@@ -3050,7 +3055,7 @@ function PrivacyPolicyDialog({ open, onOpenChange }: { open: boolean, onOpenChan
                 Cloud Storage (Firebase)
               </h3>
               <p className="text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed">
-                Your recipes, flavor stash, and settings are stored in **Google Firebase**, a secure enterprise-grade database. Access to your data is strictly limited to your authenticated UID.
+                Your recipes, {flavor()} stash, and settings are stored in **Google Firebase**, a secure enterprise-grade database. Access to your data is strictly limited to your authenticated UID.
               </p>
             </section>
 
@@ -3390,7 +3395,7 @@ function ImportInvoiceDialog({
         <DialogHeader>
           <DialogTitle>Import Invoice</DialogTitle>
           <DialogDescription>
-            Upload a PDF invoice or paste the text from your flavor order. Our AI will extract the items and update your stash.
+            Upload a PDF invoice or paste the text from your {flavor()} order. Our AI will extract the items and update your stash.
           </DialogDescription>
         </DialogHeader>
         
@@ -3605,12 +3610,28 @@ function DuplicateInventoryDialog({
 
 const VERSION_HISTORY = [
   {
+    version: "1.29.3",
+    date: "May 6, 2026",
+    changes: [
+      "Stash Removal Fix: Resolved an issue where flavours were not being removed from the stash immediately after confirmation.",
+      "Optimistic Updates: Improved UI responsiveness for inventory changes."
+    ]
+  },
+  {
+    version: "1.29.2",
+    date: "May 6, 2026",
+    changes: [
+      "Stash Search: Added the ability to search your flavour stash, shopping list, and out-of-stock items directly from the inventory tab.",
+      "Localization Fix: Optimized manufacturer matching logic to bypass locale-based spelling variants and ensure consistent identification."
+    ]
+  },
+  {
     version: "1.29.1",
     date: "May 6, 2026",
     changes: [
-      "Depletion Workflow: When a flavor hits 0ml, a new prompt helps you instantly add it to your shopping list, remove it from your stash, or both.",
-      "Inventory Sync: Fixed a bug where flavors could show conflicting volumes in different parts of the app due to naming collisions.",
-      "Cost Warnings: Added a 'missing cost' indicator for flavors imported from external sites (ELR/ATF) to help you track batch expenses accurately.",
+      "Depletion Workflow: When a flavour hits 0ml, a new prompt helps you instantly add it to your shopping list, remove it from your stash, or both.",
+      "Inventory Sync: Fixed a bug where flavours could show conflicting volumes in different parts of the app due to naming collisions.",
+      "Cost Warnings: Added a 'missing cost' indicator for flavours imported from external sites (ELR/ATF) to help you track batch expenses accurately.",
       "Dialog UX: Improved scroll behavior and layout for History windows to ensure better accessibility on mobile devices."
     ]
   },
@@ -3638,8 +3659,8 @@ const VERSION_HISTORY = [
     version: "1.27.0",
     date: "April 30, 2026",
     changes: [
-      "Smart Invoice Import: You can now paste text or upload PDFs from major flavor vendors. Our AI extracts the items, updates your stash, and tracks your costs automatically.",
-      "Order Tracking: Added a detailed Order History section to monitor your flavor spend and delivery status.",
+      "Smart Invoice Import: You can now paste text or upload PDFs from major flavour vendors. Our AI extracts the items, updates your stash, and tracks your costs automatically.",
+      "Order Tracking: Added a detailed Order History section to monitor your flavour spend and delivery status.",
       "Visual Polish: Refined the 'Safety Warning' system with clearer icons for high-potency additives."
     ]
   },
@@ -3647,7 +3668,7 @@ const VERSION_HISTORY = [
     version: "1.26.0",
     date: "April 25, 2026",
     changes: [
-      "Stash Migrator: Easily move your existing flavor stash to VapeMix AI. Supports ATF (JSON) and ELR (CSV) export files.",
+      "Stash Migrator: Easily move your existing flavour stash to VapeMix AI. Supports ATF (JSON) and ELR (CSV) export files.",
       "Mobile Lab: Significant improvements to the calculator and recipe cards for better use on smartphones while at the mixing bench.",
       "Stash Alerts: Fixed an issue where the shopping list would occasionally suggest flavors you already had in stock."
     ]
@@ -4920,7 +4941,7 @@ function RecipeEditor({
                              <Info className="w-3 h-3 text-neutral-400 cursor-help" />
                            </TooltipTrigger>
                            <TooltipContent>
-                             <p className="text-[10px]">Scales all flavor percentages for this mix session.</p>
+                             <p className="text-[10px]">Scales all {flavor()} percentages for this mix session.</p>
                            </TooltipContent>
                          </Tooltip>
                        </TooltipProvider>
@@ -4954,7 +4975,7 @@ function RecipeEditor({
                   id="description"
                   value={formData.description || ''} 
                   onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                  placeholder="Add details about this recipe, flavor profile, or special instructions..."
+                  placeholder={`Add details about this recipe, ${flavor()} profile, or special instructions...`}
                   className="w-full min-h-[80px] p-3 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all resize-none"
                 />
               </div>
@@ -5042,7 +5063,7 @@ function RecipeEditor({
                           </span>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p className="text-xs">Click to edit flavor details in your stash</p>
+                          <p className="text-xs">Click to edit {flavor()} details in your stash</p>
                         </TooltipContent>
                       </Tooltip>
                       <Button 
@@ -5077,7 +5098,7 @@ function RecipeEditor({
                             <textarea
                               value={flavor.notes || ''}
                               onChange={(e) => updateFlavor(flavor.id, { notes: e.target.value })}
-                              placeholder="Specific notes for this flavor in this recipe..."
+                              placeholder={`Specific notes for this ${flavor()} in this recipe...`}
                               className="w-full min-h-[60px] p-2 text-xs rounded-md border border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/30 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all resize-none"
                             />
                           </div>
@@ -5309,7 +5330,7 @@ function RecipeEditor({
                             }
                           }}
                           className="flex flex-col items-start gap-1 group/item text-left cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-500/50 rounded-sm"
-                          title="Click to edit flavor details in stash"
+                          title={`Click to edit ${flavor()} details in stash`}
                         >
                             <div className="flex items-center gap-2">
                               <span className="text-neutral-300 leading-tight group-hover/item:text-blue-400 transition-colors">
@@ -5399,7 +5420,7 @@ function RecipeEditor({
                             }
                           }}
                           className="text-right group/cost cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-500/50 rounded-sm"
-                          title="Click to edit flavor cost in stash"
+                          title={`Click to edit ${flavor()} cost in stash`}
                         >
                           {userSettings.mixingPreference === 'volume' ? (
                             <div className="flex flex-col items-end">
@@ -5653,7 +5674,7 @@ function RecipeEditor({
               Remove Flavor?
             </DialogTitle>
             <DialogDescription>
-              Are you sure you want to remove <strong>{formData.flavors.find(f => f.id === flavorToDelete)?.name || 'this flavor'}</strong> from your recipe? This action cannot be undone.
+              Are you sure you want to remove <strong>{formData.flavors.find(f => f.id === flavorToDelete)?.name || `this ${flavor()}`}</strong> from your recipe? This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">
@@ -5948,7 +5969,7 @@ function InventoryManager({
   shoppingList: ShoppingItem[],
   orders?: Order[],
   onAddInventoryItem: (item: InventoryFlavor) => void,
-  onRemoveInventoryItem: (name: string) => void,
+  onRemoveInventoryItem: (name: string, bypassConfirm?: boolean) => void,
   onUpdateInventoryItem: (oldName: string, item: InventoryFlavor) => void,
   onAddShoppingItem: (item: ShoppingItem) => void,
   onRemoveShoppingItem: (id: string) => void,
@@ -5964,6 +5985,7 @@ function InventoryManager({
   setSharedEditingItem: (item: InventoryFlavor | null) => void
 }) {
   const [newItem, setNewItem] = useState('');
+  const [inventorySearchQuery, setInventorySearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'manufacturer'>('name');
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
   
@@ -6017,14 +6039,42 @@ function InventoryManager({
     });
   };
 
-  const sortedInventory = useMemo(() => {
-    return sortFlavors(inventory);
-  }, [inventory, sortBy]);
-  const sortedShoppingList = useMemo(() => sortFlavors(shoppingList), [shoppingList, sortBy]);
-  const sortedMissing = useMemo(() => {
-    const missingItems = missingFlavors.map(name => ({ name }));
-    return sortFlavors(missingItems);
-  }, [missingFlavors, sortBy]);
+  const filteredInventory = useMemo(() => {
+    let list = inventory;
+    if (inventorySearchQuery) {
+      const q = inventorySearchQuery.toLowerCase();
+      list = list.filter(i => 
+        i.name.toLowerCase().includes(q) || 
+        getManufacturer(i.name).toLowerCase().includes(q) ||
+        (i.notes && i.notes.toLowerCase().includes(q))
+      );
+    }
+    return sortFlavors(list);
+  }, [inventory, sortBy, inventorySearchQuery]);
+
+  const filteredShoppingList = useMemo(() => {
+    let list = shoppingList;
+    if (inventorySearchQuery) {
+      const q = inventorySearchQuery.toLowerCase();
+      list = list.filter(i => 
+        i.name.toLowerCase().includes(q) || 
+        getManufacturer(i.name).toLowerCase().includes(q)
+      );
+    }
+    return sortFlavors(list);
+  }, [shoppingList, sortBy, inventorySearchQuery]);
+
+  const filteredMissing = useMemo(() => {
+    let list = missingFlavors.map(name => ({ name }));
+    if (inventorySearchQuery) {
+      const q = inventorySearchQuery.toLowerCase();
+      list = list.filter(i => 
+        i.name.toLowerCase().includes(q) || 
+        getManufacturer(i.name).toLowerCase().includes(q)
+      );
+    }
+    return sortFlavors(list);
+  }, [missingFlavors, sortBy, inventorySearchQuery]);
 
   const flavorUsage = useMemo(() => {
     const usageMap: Record<string, number> = {};
@@ -6063,7 +6113,7 @@ function InventoryManager({
   };
 
   const removeItem = (item: InventoryFlavor) => {
-    onRemoveInventoryItem(item.name);
+    onRemoveInventoryItem(item.name, true);
   };
 
   return (
@@ -6111,20 +6161,39 @@ function InventoryManager({
         </div>
       </CardHeader>
       <CardContent className="space-y-6">
-        <div className="flex gap-2">
-          <div className="relative flex-1">
-            <PlusCircle className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
-            <Input 
-              placeholder="Add flavor (e.g. Strawberry Ripe (TFA))" 
-              className="pl-9"
-              value={newItem}
-              onChange={(e) => setNewItem(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addItem()}
-            />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <PlusCircle className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
+              <Input 
+                placeholder={`Add ${flavor()} (e.g. Strawberry Ripe (TFA))`} 
+                className="pl-9 h-10"
+                value={newItem}
+                onChange={(e) => setNewItem(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && addItem()}
+              />
+            </div>
+            <Button onClick={() => addItem()} className="h-10 bg-neutral-900 dark:bg-neutral-200 hover:bg-neutral-800 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold shrink-0">
+              Add
+            </Button>
           </div>
-          <Button onClick={() => addItem()} className="bg-neutral-900 dark:bg-neutral-200 hover:bg-neutral-800 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold">
-            Add
-          </Button>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
+            <Input 
+              placeholder={`Search your stash...`} 
+              className="pl-9 h-10 border-blue-100 dark:border-blue-900/40 focus:ring-blue-100 dark:focus:ring-blue-900/20"
+              value={inventorySearchQuery}
+              onChange={(e) => setInventorySearchQuery(e.target.value)}
+            />
+            {inventorySearchQuery && (
+              <button 
+                onClick={() => setInventorySearchQuery('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full"
+              >
+                <X className="w-3 h-3 text-neutral-400" />
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -6140,7 +6209,12 @@ function InventoryManager({
             </div>
             <ScrollArea className="h-[600px] rounded-xl border border-green-100 dark:border-green-900 bg-green-50/20 dark:bg-green-950/20 p-4">
                 <div className="flex flex-col gap-2">
-                  {sortedInventory.map((item, idx) => {
+                  {filteredInventory.length === 0 && inventorySearchQuery ? (
+                    <div className="flex flex-col items-center justify-center py-12 text-center">
+                      <Search className="w-8 h-8 text-neutral-300 mb-2" />
+                      <p className="text-sm font-medium text-neutral-500">No matching flavours found</p>
+                    </div>
+                  ) : filteredInventory.map((item, idx) => {
                     const isOnShoppingList = shoppingList.some(s => isFlavorMatch(s.name, item.name));
                     const itemKey = item.id || `${item.name}-${idx}`;
                     return (
@@ -6325,7 +6399,7 @@ function InventoryManager({
               </div>
               <ScrollArea className="h-[600px] rounded-xl border border-blue-100 dark:border-blue-900 bg-blue-50/20 dark:bg-blue-950/20 p-3">
                 <div className="space-y-2">
-                  {sortedShoppingList.map((item) => (
+                  {filteredShoppingList.map((item) => (
                     <div 
                       key={item.id} 
                       className="flex items-center justify-between bg-white dark:bg-neutral-900 p-3 rounded-xl border border-blue-100 dark:border-blue-800 shadow-sm group cursor-pointer hover:border-blue-300 dark:hover:border-blue-700 transition-colors gap-4"
@@ -6381,8 +6455,13 @@ function InventoryManager({
                       </div>
                     </div>
                   ))}
-                  {shoppingList.length === 0 && (
-                    <p className="text-center py-8 text-xs text-neutral-400 italic">List is empty</p>
+                  {filteredShoppingList.length === 0 && (
+                    <div className="flex flex-col items-center justify-center py-12 text-center">
+                      <Search className="w-6 h-6 text-neutral-300 dark:text-neutral-700 mb-1" />
+                      <p className="text-[10px] font-medium text-neutral-500">
+                        {shoppingList.length === 0 ? "List is empty" : "No matches found"}
+                      </p>
+                    </div>
                   )}
                 </div>
               </ScrollArea>
@@ -6397,7 +6476,7 @@ function InventoryManager({
               </div>
               <ScrollArea className="h-[600px] rounded-xl border border-amber-100 dark:border-amber-900 bg-amber-50/20 dark:bg-amber-950/20 p-3">
                     <div className="space-y-2">
-                  {sortedMissing.map((item, idx) => {
+                  {filteredMissing.map((item, idx) => {
                     const isOnShoppingList = shoppingList.some(s => isFlavorMatch(s.name, item.name));
                     const itemKey = `missing-${item.name}-${idx}`;
                     return (
@@ -6451,8 +6530,13 @@ function InventoryManager({
                     </div>
                   );
                 })}
-                {sortedMissing.length === 0 && (
-                  <p className="text-center py-8 text-xs text-neutral-400 italic">No out of stock ingredients</p>
+                {filteredMissing.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-12 text-center">
+                    <Search className="w-6 h-6 text-neutral-300 dark:text-neutral-700 mb-1" />
+                    <p className="text-[10px] font-medium text-neutral-500">
+                      {missingFlavors.length === 0 ? "No out of stock ingredients" : "No matches found"}
+                    </p>
+                  </div>
                 )}
               </div>
             </ScrollArea>
@@ -6516,7 +6600,7 @@ function InventoryManager({
               <Button variant="outline" onClick={() => setItemToDelete(null)}>Cancel</Button>
               <Button variant="destructive" onClick={() => {
                 if (itemToDelete) {
-                  onRemoveInventoryItem(itemToDelete.name);
+                  onRemoveInventoryItem(itemToDelete.name, true);
                   setItemToDelete(null);
                 }
               }}>Remove {flavor(true)}</Button>
@@ -6794,7 +6878,7 @@ function FlavorEditDialog({
         <DialogHeader>
           <DialogTitle>Edit {flavor(true)}</DialogTitle>
           <DialogDescription>
-            Update the flavor details and calculate accurate costs.
+            Update the {flavor()} details and calculate accurate costs.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-6 py-4">
@@ -6832,7 +6916,7 @@ function FlavorEditDialog({
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="edit-notes-shared">Flavor Notes</Label>
+            <Label htmlFor="edit-notes-shared">{flavor(true)} Notes</Label>
             <textarea 
               id="edit-notes-shared"
               value={editNotes}
@@ -6852,7 +6936,7 @@ function FlavorEditDialog({
                 {(item?.safetyWarnings || getSafetyWarnings(editManufacturer ? `${editName} (${editManufacturer})` : editName)).join(" ")}
               </p>
               <p className="text-[9px] text-neutral-400 mt-1 leading-tight">
-                This flavor has been flagged as potentially containing components (like DAAP) that some users prefer to avoid.
+                This {flavor()} has been flagged as potentially containing components (like DAAP) that some users prefer to avoid.
               </p>
             </div>
           )}
@@ -7031,7 +7115,7 @@ function AiLab({
               AI Setup Required
             </CardTitle>
             <CardDescription className="dark:text-neutral-400">
-              To use the AI Flavor Lab, you need to connect your own Gemini API key.
+              To use the AI {flavor(true)} Lab, you need to connect your own Gemini API key.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -7337,7 +7421,7 @@ function SettingsPanel({
             <Sparkles className="w-5 h-5 text-purple-500" />
             AI Configuration
           </CardTitle>
-          <CardDescription>Configure your Gemini API key for the AI Flavor Lab.</CardDescription>
+          <CardDescription>Configure your Gemini API key for the AI {flavor(true)} Lab.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -7480,9 +7564,9 @@ function SettingsPanel({
               />
             </div>
             <div className="space-y-2 lg:col-span-2">
-              <Label>AI Flavor Lab Training (Custom Guidelines)</Label>
+              <Label>AI {flavor(true)} Lab Training (Custom Guidelines)</Label>
               <textarea 
-                placeholder="Give the AI specific rules, e.g. 'Never use WS-23 above 0.5%', 'Prefer simple 3-ingredient recipes', 'Treat FLV flavors as ultra-concentrates'."
+                placeholder={`Give the AI specific rules, e.g. 'Never use WS-23 above 0.5%', 'Prefer simple 3-ingredient recipes', 'Treat FLV ${flavors()} as ultra-concentrates'.`}
                 value={userSettings.aiCustomInstructions || ''} 
                 onChange={(e) => onUpdateSettings({ ...userSettings, aiCustomInstructions: e.target.value })}
                 className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 h-24"
@@ -7963,9 +8047,9 @@ function StashImportDialog({
     }}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Import Flavor Stash</DialogTitle>
+          <DialogTitle>Import {flavor(true)} Stash</DialogTitle>
           <DialogDescription>
-            Import your flavor stash from All The Flavors (JSON) or E-Liquid Recipes (CSV).
+            Import your {flavor()} stash from All The Flavors (JSON) or E-Liquid Recipes (CSV).
           </DialogDescription>
         </DialogHeader>
         
@@ -8023,8 +8107,8 @@ function StashImportDialog({
 
             <div className="text-[10px] text-neutral-400 space-y-1 bg-neutral-50 dark:bg-neutral-900/50 p-2 rounded border border-neutral-100 dark:border-neutral-800">
               <p className="font-bold uppercase tracking-wider">How to export:</p>
-              <p>• <strong>ATF:</strong> Profile → Backup Data → Flavor Stash → JSON</p>
-              <p>• <strong>ELR:</strong> User → My Flavor Stash → Export to csv</p>
+              <p>• <strong>ATF:</strong> Profile → Backup Data → {flavor(true)} Stash → JSON</p>
+              <p>• <strong>ELR:</strong> User → My {flavor(true)} Stash → Export to csv</p>
             </div>
           </div>
         </div>

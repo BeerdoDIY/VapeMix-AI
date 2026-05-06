@@ -1,6 +1,6 @@
 /**
- * Utility for detecting potentially harmful components in flavorings.
- * This is based on common e-liquid flavoring industry knowledge (DAAP - Diacetyl, Acetyl Propionyl, Acetoin).
+ * Utility for detecting potentially harmful components in flavourings.
+ * This is based on common e-liquid flavouring industry knowledge (DAAP - Diacetyl, Acetyl Propionyl, Acetoin).
  */
 
 interface BrandSafetyInfo {
@@ -23,13 +23,13 @@ const SAFETY_RULES: BrandSafetyInfo[] = [
   },
   {
     keywords: ["Ethyl Maltol"],
-    warning: "Flavor enhancer that may increase addictive potential or alter absorption."
+    warning: "Flavour enhancer that may increase addictive potential or alter absorption."
   }
 ];
 
 /**
- * Checks a flavor name for potential safety concerns.
- * @param flavorName The full name of the flavor (e.g., "Vanilla Bean Ice Cream (CAP)")
+ * Checks a flavour name for potential safety concerns.
+ * @param flavorName The full name of the flavour (e.g., "Vanilla Bean Ice Cream (CAP)")
  * @returns An array of warning strings if any concern is found.
  */
 export function getSafetyWarnings(flavorName: string): string[] {
@@ -52,8 +52,8 @@ export function getSafetyWarnings(flavorName: string): string[] {
 }
 
 /**
- * Checks if a flavor's percentage exceeds recommended "pleasant" thresholds for potent ingredients.
- * @param flavorName The full name of the flavor
+ * Checks if a flavour's percentage exceeds recommended "pleasant" thresholds for potent ingredients.
+ * @param flavorName The full name of the flavour
  * @param percentage The suggested percentage in the recipe
  * @returns A warning string if the percentage is considered high, or null.
  */
