@@ -131,5 +131,7 @@ export interface Mix {
     safetyWarnings?: string[];
   }[];
   steepingDays?: number;
+  rating?: number;
+  notes?: string;
   uid: string;
 }

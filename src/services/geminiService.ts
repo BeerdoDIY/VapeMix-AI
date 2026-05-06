@@ -35,11 +35,20 @@ async function getApiKey(userApiKey?: string) {
   return null;
 }
 
+export interface FeedbackRecipe {
+  name: string;
+  flavors: { name: string; percentage: number }[];
+  rating: number;
+  description?: string;
+}
+
 export async function suggestRecipes(
   availableFlavors: string[], 
   preferences?: string, 
   userApiKey?: string,
-  customInstructions?: string
+  customInstructions?: string,
+  highRatedRecipes: FeedbackRecipe[] = [],
+  lowRatedRecipes: FeedbackRecipe[] = []
 ) {
   const isUS = typeof navigator !== 'undefined' && navigator.language === 'en-US';
   const flavorWord = isUS ? 'flavor' : 'flavour';
@@ -72,7 +81,29 @@ export async function suggestRecipes(
   - If a user explicitly asks for an unusually high percentage of a known potent ${flavorWord} (e.g. "5% WS-23"), follow the instruction but include a clear caution in the description field stating that this level is very high and may be unpleasant.
   - steepingDays should be realistic (Fruits: 1-3 days, Creams/Custards: 7-14/21 days, Tobaccos: 14-30 days).
 
+  INVENTIVENESS & LEARNING (CRITICAL):
+  - ANALYZE the provided HIGH-RATED recipes to understand the "User's Palate" (e.g., preference for complex bakeries, simple fruits, specific cooling levels).
+  - DO NOT just suggest similar recipes to high-rated ones; be INVENTIVE while respecting the palate.
+  - ANALYZE the provided LOW-RATED recipes (1-2 stars) to understand what the user DOES NOT like.
+  - AVOID combinations, flavor profiles, or specific high percentages that resulted in low ratings. Use this to learn "Off-Notes" the user is sensitive to.
+
   PLEASE USE ${isUS ? 'US' : 'COMMONWEALTH'} SPELLING (e.g. use "${flavorWord}") appearing in your responses.`;
+
+  if (highRatedRecipes && highRatedRecipes.length > 0) {
+    prompt += `\n\nUSER'S TOP-RATED RECIPES (LEARN FROM THESE):\n`;
+    highRatedRecipes.forEach(r => {
+      const flavors = r.flavors.map(f => `${f.name} (${f.percentage}%)`).join(', ');
+      prompt += `- ${r.name} (Rating: ${r.rating}/5): ${flavors}. Notes: ${r.description || 'None'}\n`;
+    });
+  }
+
+  if (lowRatedRecipes && lowRatedRecipes.length > 0) {
+    prompt += `\n\nUSER'S LOW-RATED RECIPES (AVOID THESE PATTERNS):\n`;
+    lowRatedRecipes.forEach(r => {
+      const flavors = r.flavors.map(f => `${f.name} (${f.percentage}%)`).join(', ');
+      prompt += `- ${r.name} (Rating: ${r.rating}/5): ${flavors}. Notes: ${r.description || 'None'}\n`;
+    });
+  }
 
   if (preferences && preferences.trim()) {
     prompt += `\n\nUser Preferences: ${preferences.trim()}\nPlease try to follow these preferences while still ONLY using the available flavors listed above.`;

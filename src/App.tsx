@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { useState, useEffect, useMemo, ReactNode, useCallback, useRef } from 'react';
+import { Toaster, toast } from 'sonner';
 import { 
   Plus, 
   Search, 
@@ -573,6 +574,7 @@ export default function App() {
 
 function AppContent() {
   const [user, setUser] = useState<User | null>(null);
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [firebaseError, setFirebaseError] = useState<string | null>(null);
@@ -705,7 +707,7 @@ function AppContent() {
   }, [activeTab, cookieConsent]);
 
   // Version
-  const VERSION = "1.28.0";
+  const VERSION = "1.29.1";
 
   // History Navigation Support
   useEffect(() => {
@@ -1190,6 +1192,32 @@ function AppContent() {
         await withTimeout(setDoc(recipeRef, sanitizeForFirestore({ ...recipes.find(r => r.id === recipeId), rating, uid }), { merge: true }));
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, `users/${uid}/recipes/${recipeId}`);
+      }
+    }
+  };
+
+  const handleUpdateMixRating = async (mixId: string, rating: number) => {
+    setMixes(prev => prev.map(m => m.id === mixId ? { ...m, rating } : m));
+    if (user) {
+      const uid = user.uid;
+      try {
+        const mixRef = doc(db, 'users', uid, 'mixes', mixId);
+        await withTimeout(setDoc(mixRef, { rating }, { merge: true }));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `users/${uid}/mixes/${mixId}`);
+      }
+    }
+  };
+
+  const handleUpdateMixNotes = async (mixId: string, notes: string) => {
+    setMixes(prev => prev.map(m => m.id === mixId ? { ...m, notes } : m));
+    if (user) {
+      const uid = user.uid;
+      try {
+        const mixRef = doc(db, 'users', uid, 'mixes', mixId);
+        await withTimeout(setDoc(mixRef, { notes }, { merge: true }));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `users/${uid}/mixes/${mixId}`);
       }
     }
   };
@@ -1702,7 +1730,12 @@ function AppContent() {
     await internalAddInventoryItem(item);
   };
 
-  const removeInventoryItem = async (name: string) => {
+  const removeInventoryItem = async (name: string, bypassConfirm: boolean = false) => {
+    if (!bypassConfirm) {
+      const confirmed = window.confirm(`Are you sure you want to remove ${name} from your stash?`);
+      if (!confirmed) return;
+    }
+
     if (user) {
       const uid = user.uid;
       const docId = name.replace(/\//g, '_');
@@ -1720,10 +1753,79 @@ function AppContent() {
     }
   };
 
+  const promptForDepletedFlavor = (name: string) => {
+    const isOnShoppingList = shoppingList.some(s => isFlavorMatch(s.name, name));
+
+    toast.custom((t) => (
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl shadow-2xl p-4 flex flex-col gap-3 min-w-[320px] animate-in fade-in slide-in-from-top-4 duration-300">
+        <div className="flex justify-between items-start">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-amber-100 dark:bg-amber-900/30 rounded-lg">
+              <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+            </div>
+            <div>
+              <h4 className="font-bold text-sm text-neutral-900 dark:text-neutral-100">{name} is empty!</h4>
+              <p className="text-[10px] text-neutral-500 dark:text-neutral-400 font-medium">
+                {isOnShoppingList ? "Already on shopping list" : "Auto-detected during depletion"}
+              </p>
+            </div>
+          </div>
+          <button onClick={() => toast.dismiss(t)} className="p-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full transition-colors">
+            <X className="w-3.5 h-3.5 text-neutral-400" />
+          </button>
+        </div>
+
+        <div className="space-y-2">
+          {!isOnShoppingList && (
+            <Button 
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold h-9 text-xs"
+              onClick={() => {
+                addShoppingItem({ id: crypto.randomUUID(), name, addedAt: Date.now() });
+                removeInventoryItem(name, true);
+                toast.dismiss(t);
+              }}
+            >
+              Add to List & Remove from Stash
+            </Button>
+          )}
+          
+          <div className={isOnShoppingList ? "w-full" : "grid grid-cols-2 gap-2"}>
+            {!isOnShoppingList && (
+              <Button 
+                variant="outline" 
+                className="h-8 text-[10px] font-semibold border-neutral-200 dark:border-neutral-800"
+                onClick={() => {
+                  addShoppingItem({ id: crypto.randomUUID(), name, addedAt: Date.now() });
+                  toast.dismiss(t);
+                }}
+              >
+                Add to List
+              </Button>
+            )}
+            <Button 
+              variant="outline" 
+              className={`h-8 text-[10px] font-semibold text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20 border-neutral-200 dark:border-neutral-800 ${isOnShoppingList ? 'w-full' : ''}`}
+              onClick={() => {
+                removeInventoryItem(name, true);
+                toast.dismiss(t);
+              }}
+            >
+              Remove from Stash
+            </Button>
+          </div>
+        </div>
+      </div>
+    ), { duration: 15000, position: 'top-right' });
+  };
+
   const updateInventoryItem = async (oldName: string, item: InventoryFlavor) => {
     // Check for safety warnings if name changed or missing
     if (oldName !== item.name || !item.safetyWarnings || item.safetyWarnings.length === 0) {
       item.safetyWarnings = getSafetyWarnings(item.name);
+    }
+
+    if (item.volumeMl !== undefined && item.volumeMl <= 0) {
+      promptForDepletedFlavor(item.name);
     }
 
     if (user) {
@@ -1788,11 +1890,13 @@ function AppContent() {
     
     // 1. Calculate cumulative decrements for each inventory item
     const inventoryDecrements: Record<string, number> = {};
-    inventory.forEach(invItem => {
-      const matchingMixFlavors = mix.flavors.filter(f => isFlavorMatch(f.name, invItem.name));
-      const totalUsedMl = matchingMixFlavors.reduce((sum, f) => sum + f.ml, 0);
-      if (totalUsedMl > 0) {
-        inventoryDecrements[invItem.name] = totalUsedMl;
+    mix.flavors.forEach(f => {
+      // Find the single best match for this recipe flavor in inventory
+      const bestMatch = inventory.find(inv => inv.name === f.name) || 
+                       inventory.find(inv => isFlavorMatch(inv.name, f.name));
+      
+      if (bestMatch) {
+        inventoryDecrements[bestMatch.name] = (inventoryDecrements[bestMatch.name] || 0) + f.ml;
       }
     });
 
@@ -1808,6 +1912,17 @@ function AppContent() {
     });
     
     setInventory(updatedInventory);
+    
+    // Proactive prompt for depleted flavors
+    Object.entries(inventoryDecrements).forEach(([invName, usedMl]) => {
+      const invItem = inventory.find(i => i.name === invName);
+      if (invItem && invItem.volumeMl !== undefined) {
+        const newVolume = Number(Math.max(0, invItem.volumeMl - usedMl).toFixed(2));
+        if (newVolume <= 0) {
+          promptForDepletedFlavor(invName);
+        }
+      }
+    });
     
     if (user) {
       const uid = user.uid;
@@ -2164,18 +2279,66 @@ function AppContent() {
     setIsAiLoading(true);
     try {
       const inventoryNames = inventory.map(i => i.name);
+      
+      // Collect top rated recipes (4+ stars) for palate analysis
+      const highRatedRecipes = recipes
+        .filter(r => r.rating && r.rating >= 4)
+        .map(r => ({
+          name: r.name,
+          flavors: r.flavors.map(f => ({ name: f.name, percentage: f.percentage })),
+          rating: r.rating || 0,
+          description: r.description
+        }));
+
+      // Collect top rated individual batches (mixes)
+      const highRatedMixes = mixes
+        .filter(m => m.rating && m.rating >= 4)
+        .map(m => ({
+          name: `${m.recipeName} (Batch - ${new Date(m.mixedAt).toLocaleDateString()})`,
+          flavors: m.flavors.map(f => ({ name: f.name, percentage: f.percentage })),
+          rating: m.rating || 0,
+          description: m.notes
+        }));
+
+      // Collect low rated recipes (1-2 stars) to avoid patterns
+      const lowRatedRecipes = recipes
+        .filter(r => r.rating && r.rating > 0 && r.rating <= 2)
+        .map(r => ({
+          name: r.name,
+          flavors: r.flavors.map(f => ({ name: f.name, percentage: f.percentage })),
+          rating: r.rating || 0,
+          description: r.description
+        }));
+
+      // Collect low rated individual batches (mixes)
+      const lowRatedMixes = mixes
+        .filter(m => m.rating && m.rating > 0 && m.rating <= 2)
+        .map(m => ({
+          name: `${m.recipeName} (Batch - ${new Date(m.mixedAt).toLocaleDateString()})`,
+          flavors: m.flavors.map(f => ({ name: f.name, percentage: f.percentage })),
+          rating: m.rating || 0,
+          description: m.notes
+        }));
+
+      const positiveFeedback = [...highRatedRecipes, ...highRatedMixes];
+      const negativeFeedback = [...lowRatedRecipes, ...lowRatedMixes];
+
       if (import.meta.env.VITE_GA_MEASUREMENT_ID) {
         console.log('Tracking Event: generate_recipes');
         trackEvent('generate_recipes', {
           category: 'AI',
-          flavor_count: inventoryNames.length
+          flavor_count: inventoryNames.length,
+          positive_feedback_count: positiveFeedback.length,
+          negative_feedback_count: negativeFeedback.length
         });
       }
       const suggestions = await suggestRecipes(
         inventoryNames, 
         preferences, 
         userSettings.geminiApiKey,
-        userSettings.aiCustomInstructions
+        userSettings.aiCustomInstructions,
+        positiveFeedback,
+        negativeFeedback
       );
       setAiSuggestions(suggestions);
     } catch (error: any) {
@@ -2566,8 +2729,11 @@ function AppContent() {
                     }}
                     onDelete={() => handleDeleteRecipe(recipe)}
                     onUpdateRating={(rating) => handleUpdateRating(recipe.id, rating)}
+                    onUpdateMixRating={handleUpdateMixRating}
+                    onUpdateMixNotes={handleUpdateMixNotes}
                     onEditFlavor={(flavorName) => {
-                      const existing = inventory.find(i => isFlavorMatch(i.name, flavorName));
+                      const existing = inventory.find(i => i.name === flavorName) || 
+                                      inventory.find(i => isFlavorMatch(i.name, flavorName));
                       if (existing) {
                         startEditing(existing);
                       } else {
@@ -2711,7 +2877,12 @@ function AppContent() {
       <div className="text-center py-10 pb-28 md:pb-12 space-y-3 bg-neutral-50/50 dark:bg-neutral-900/50 border-t border-neutral-100 dark:border-neutral-800 mt-8">
         <p className="text-xs md:text-sm text-neutral-500 dark:text-neutral-400 uppercase tracking-[0.2em] font-bold">VapeMix AI • Crafted for {flavor(true)}</p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-6 text-[11px] md:text-xs">
-          <p className="text-neutral-400 dark:text-neutral-500 uppercase tracking-widest font-bold">Version {VERSION}</p>
+          <button 
+            onClick={() => setShowVersionHistory(true)}
+            className="text-neutral-400 dark:text-neutral-500 uppercase tracking-widest font-bold hover:text-blue-500 transition-colors cursor-pointer"
+          >
+            Version {VERSION}
+          </button>
           <span className="hidden sm:block w-1.5 h-1.5 rounded-full bg-neutral-200 dark:bg-neutral-800" />
           <a 
             href="https://ko-fi.com/vapemixai" 
@@ -2733,6 +2904,10 @@ function AppContent() {
       </div>
 
       <PrivacyPolicyDialog open={showPrivacyPolicy} onOpenChange={setShowPrivacyPolicy} />
+
+      <VersionHistoryDialog open={showVersionHistory} onOpenChange={setShowVersionHistory} />
+
+      <Toaster richColors position="top-right" closeButton />
 
       <FlavorEditDialog 
         item={editingItem} 
@@ -3428,31 +3603,162 @@ function DuplicateInventoryDialog({
   );
 }
 
+const VERSION_HISTORY = [
+  {
+    version: "1.29.1",
+    date: "May 6, 2026",
+    changes: [
+      "Depletion Workflow: When a flavor hits 0ml, a new prompt helps you instantly add it to your shopping list, remove it from your stash, or both.",
+      "Inventory Sync: Fixed a bug where flavors could show conflicting volumes in different parts of the app due to naming collisions.",
+      "Cost Warnings: Added a 'missing cost' indicator for flavors imported from external sites (ELR/ATF) to help you track batch expenses accurately.",
+      "Dialog UX: Improved scroll behavior and layout for History windows to ensure better accessibility on mobile devices."
+    ]
+  },
+  {
+    version: "1.29.0",
+    date: "May 5, 2026",
+    changes: [
+      "Palate Intelligence: The AI Lab now learns from your personal taste. High-rated mixes help it find your 'holy grail', while low ratings help it avoid profiles you dislike.",
+      "Batch Feedback: Added the ability to rate and add private notes to individual batch mixes in your history.",
+      "Creative Engine: Re-tuned the generation logic to be more inventive, suggesting unique profile directions rather than just safe bets.",
+      "Version Explorer: Added this dialog to help you stay updated with the latest Lab enhancements."
+    ]
+  },
+  {
+    version: "1.28.0",
+    date: "May 3, 2026",
+    changes: [
+      "AI Lab Training: You can now provide custom instructions in Settings to teach the AI your specific mixing style and preferences.",
+      "Reliability Fixes: Improved app stability when using the Lab in areas with patchy internet connection.",
+      "Update Notifications: You'll now see a helpful prompt if a new version of the app is ready to be loaded.",
+      "Smooth Rating: Improved the interface to ensure your ratings are saved instantly without any flickering."
+    ]
+  },
+  {
+    version: "1.27.0",
+    date: "April 30, 2026",
+    changes: [
+      "Smart Invoice Import: You can now paste text or upload PDFs from major flavor vendors. Our AI extracts the items, updates your stash, and tracks your costs automatically.",
+      "Order Tracking: Added a detailed Order History section to monitor your flavor spend and delivery status.",
+      "Visual Polish: Refined the 'Safety Warning' system with clearer icons for high-potency additives."
+    ]
+  },
+  {
+    version: "1.26.0",
+    date: "April 25, 2026",
+    changes: [
+      "Stash Migrator: Easily move your existing flavor stash to VapeMix AI. Supports ATF (JSON) and ELR (CSV) export files.",
+      "Mobile Lab: Significant improvements to the calculator and recipe cards for better use on smartphones while at the mixing bench.",
+      "Stash Alerts: Fixed an issue where the shopping list would occasionally suggest flavors you already had in stock."
+    ]
+  },
+  {
+    version: "1.25.0",
+    date: "April 18, 2026",
+    changes: [
+      "AI Lab Core: Introduced the first version of our Gemini-powered recipe suggestion module.",
+      "PWA Support: Added the ability to install VapeMix AI to your home screen for a full-screen, app-like experience.",
+      "Offline Mode: Foundation for offline access, allowing you to view recipes and inventory without a data connection."
+    ]
+  },
+  {
+    version: "1.24.0",
+    date: "April 12, 2026",
+    changes: [
+      "Advanced Scaling: You can now scale flavors independently by any percentage relative to the original recipe.",
+      "Batch History: Initial release of the Mix History system to keep track of every bottle you create.",
+      "Dark Mode: Full dark theme support across the entire application for low-light mixing sessions."
+    ]
+  }
+];
+
+function VersionHistoryDialog({ 
+  open, 
+  onOpenChange 
+}: { 
+  open: boolean, 
+  onOpenChange: (open: boolean) => void 
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md bg-neutral-50 dark:bg-neutral-900 border-none p-0 overflow-hidden shadow-2xl flex flex-col h-full max-h-[85vh] sm:max-h-[700px]">
+        <DialogHeader className="p-6 pb-0 bg-neutral-900 text-white shrink-0 flex flex-col gap-2">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="p-1.5 bg-blue-600 rounded-lg">
+              <History className="w-5 h-5 text-white" />
+            </div>
+            <DialogTitle className="text-xl font-bold">Version History</DialogTitle>
+          </div>
+          <DialogDescription className="text-neutral-400 pb-6">
+            Explore the latest features and improvements in VapeMix AI.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex-1 overflow-hidden">
+          <ScrollArea className="h-full w-full">
+            <div className="p-6 space-y-8">
+              {VERSION_HISTORY.map((v, i) => (
+                <div key={v.version} className="relative pl-6 border-l border-neutral-200 dark:border-neutral-800 last:pb-0 pb-2">
+                  <div className={`absolute -left-1.5 top-1.5 w-3 h-3 rounded-full border-2 border-white dark:border-neutral-900 ${i === 0 ? 'bg-blue-600' : 'bg-neutral-400 dark:bg-neutral-600'}`} />
+                  <div className="flex justify-between items-baseline mb-2">
+                    <h3 className={`font-bold ${i === 0 ? 'text-blue-600 dark:text-blue-400' : 'text-neutral-900 dark:text-neutral-100'}`}>
+                      v{v.version}
+                      {i === 0 && <Badge className="ml-2 bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 border-none text-[9px] h-4">LATEST</Badge>}
+                    </h3>
+                    <span className="text-[10px] font-mono text-neutral-400">{v.date}</span>
+                  </div>
+                  <ul className="space-y-2">
+                    {v.changes.map((change, ci) => (
+                      <li key={ci} className="text-xs text-neutral-600 dark:text-neutral-400 flex gap-2">
+                        <div className="mt-1.5 w-1 h-1 rounded-full bg-neutral-300 dark:bg-neutral-700 shrink-0" />
+                        {change}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        </div>
+        <div className="p-4 bg-neutral-100 dark:bg-neutral-800/50 flex justify-end shrink-0 border-t border-neutral-200 dark:border-neutral-800 m-0">
+          <Button variant="outline" onClick={() => onOpenChange(false)} className="h-8 text-xs font-bold uppercase tracking-wider">
+            Close
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function MixHistoryDialog({ 
   open, 
   onOpenChange, 
   mixes,
   inventory = [],
-  orders = []
+  orders = [],
+  onUpdateRating,
+  onUpdateNotes
 }: { 
   open: boolean, 
   onOpenChange: (open: boolean) => void, 
   mixes: Mix[],
   inventory?: InventoryFlavor[],
-  orders?: Order[]
+  orders?: Order[],
+  onUpdateRating?: (mixId: string, rating: number) => void,
+  onUpdateNotes?: (mixId: string, notes: string) => void
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[500px]">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-[500px] flex flex-col h-full max-h-[85vh] sm:max-h-[700px] p-0 overflow-hidden">
+        <DialogHeader className="p-6 pb-2 shrink-0 flex flex-col gap-2">
           <DialogTitle>Mix History</DialogTitle>
           <DialogDescription>
-            A record of every time this recipe was mixed.
+            A record of every time this recipe was mixed. Rate your mixes to help the AI learn your palate!
           </DialogDescription>
         </DialogHeader>
-        <ScrollArea className="h-[400px] pr-4">
-          <div className="space-y-4 py-4">
-            {mixes.sort((a, b) => b.mixedAt - a.mixedAt).map((mix) => {
+        <div className="flex-1 overflow-hidden">
+          <ScrollArea className="h-full w-full">
+            <div className="px-6 space-y-4 py-4">
+              {mixes.sort((a, b) => b.mixedAt - a.mixedAt).map((mix) => {
               const daysSinceMixed = Math.floor((Date.now() - mix.mixedAt) / (1000 * 60 * 60 * 24));
               const steepTime = mix.steepingDays || 0;
               const isSteeped = steepTime === 0 || daysSinceMixed >= steepTime;
@@ -3471,15 +3777,22 @@ function MixHistoryDialog({
                       </p>
                     </div>
                     <div className="flex flex-col items-end gap-1.5">
-                      <Badge variant={isSteeped ? "secondary" : "default"} className={`text-[9px] uppercase tracking-wider ${isSteeped ? 'bg-green-100 dark:bg-green-950/30 text-green-700 dark:text-green-400 border-none' : 'bg-blue-600 text-white border-none'}`}>
-                        {isSteeped ? 'Ready to Vape' : `Steeping: ${daysRemaining}d Left`}
-                      </Badge>
+                      <div className="flex gap-1 items-center">
+                        <Badge variant={isSteeped ? "secondary" : "default"} className={`text-[9px] uppercase tracking-wider ${isSteeped ? 'bg-green-100 dark:bg-green-950/30 text-green-700 dark:text-green-400 border-none' : 'bg-blue-600 text-white border-none'}`}>
+                          {isSteeped ? 'Ready to Vape' : `Steeping: ${daysRemaining}d Left`}
+                        </Badge>
+                      </div>
                       {mix.flavorIntensity !== undefined && mix.flavorIntensity !== 100 && (
                         <Badge variant="outline" className="text-[8px] h-4 px-1.5 font-bold uppercase tracking-wider bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-500 border-amber-100 dark:border-amber-900/30">
                           <Beaker size={8} className="mr-0.5" /> Scaled: {mix.flavorIntensity}%
                         </Badge>
                       )}
                     </div>
+                  </div>
+
+                  <div className="flex justify-between items-center py-1">
+                    <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-tighter">Your Rating</span>
+                    <StarRating rating={mix.rating} onChange={(r) => onUpdateRating?.(mix.id, r)} size={14} />
                   </div>
 
                   {(mix.totalVolume || mix.targetPgRatio !== undefined || mix.targetNicMg !== undefined) && (
@@ -3504,6 +3817,15 @@ function MixHistoryDialog({
                       )}
                     </div>
                   )}
+
+                  <div className="space-y-1.5">
+                    <textarea
+                      placeholder="Add notes about this batch (flavor profile, smoothness, etc.)"
+                      className="w-full text-[11px] bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded p-2 focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[50px] resize-none"
+                      value={mix.notes || ''}
+                      onChange={(e) => onUpdateNotes?.(mix.id, e.target.value)}
+                    />
+                  </div>
 
                   {steepTime > 0 && (
                     <div className="space-y-1.5">
@@ -3559,7 +3881,8 @@ function MixHistoryDialog({
             )}
           </div>
         </ScrollArea>
-        <DialogFooter>
+      </div>
+        <DialogFooter className="p-4 bg-neutral-50 dark:bg-neutral-900/50 shrink-0 border-t border-neutral-100 dark:border-neutral-800 m-0">
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Close</Button>
         </DialogFooter>
       </DialogContent>
@@ -3567,7 +3890,23 @@ function MixHistoryDialog({
   );
 }
 
-function RecipeCard({ recipe, onEdit, onDelete, onUpdateRating, inventory, shoppingList, orders = [], mixes = [], onEditFlavor }: RecipeCardProps & { mixes?: Mix[] }) {
+function RecipeCard({ 
+  recipe, 
+  onEdit, 
+  onDelete, 
+  onUpdateRating, 
+  onUpdateMixRating,
+  onUpdateMixNotes,
+  inventory, 
+  shoppingList, 
+  orders = [], 
+  mixes = [], 
+  onEditFlavor 
+}: RecipeCardProps & { 
+  mixes?: Mix[],
+  onUpdateMixRating?: (mixId: string, rating: number) => void,
+  onUpdateMixNotes?: (mixId: string, notes: string) => void
+}) {
   const [showHistory, setShowHistory] = useState(false);
   const [showDescription, setShowDescription] = useState(false);
   const [expandedFlavorNotes, setExpandedFlavorNotes] = useState<Record<string, boolean>>({});
@@ -3699,7 +4038,8 @@ function RecipeCard({ recipe, onEdit, onDelete, onUpdateRating, inventory, shopp
         <div className="flex flex-wrap gap-1.5 mt-2">
             {recipe.flavors.map((f, index) => {
               // f is a RecipeFlavor, invItem is from stash/inventory
-              const invItem = inventory.find(inv => isFlavorMatch(inv.name, f.name));
+              const invItem = inventory.find(inv => inv.name === f.name) || 
+                             inventory.find(inv => isFlavorMatch(inv.name, f.name));
               const inStock = !!invItem;
               // Notes from the stash (inventory)
               const stashNotes = invItem?.notes || '';
@@ -3851,6 +4191,8 @@ function RecipeCard({ recipe, onEdit, onDelete, onUpdateRating, inventory, shopp
         mixes={mixes}
         inventory={inventory}
         orders={orders}
+        onUpdateRating={onUpdateMixRating}
+        onUpdateNotes={onUpdateMixNotes}
       />
     </>
   );
@@ -5676,26 +6018,7 @@ function InventoryManager({
   };
 
   const sortedInventory = useMemo(() => {
-    // Merge duplicates for display to improve the "Duplicate Detection" experience
-    const merged: InventoryFlavor[] = [];
-    inventory.forEach(item => {
-      const existing = merged.find(m => isFlavorMatch(m.name, item.name));
-      if (existing) {
-        // Merge volumes
-        existing.volumeMl = (existing.volumeMl || 0) + (item.volumeMl || 0);
-        // Keep the more complete name if possible (the one with manufacturer in parens)
-        if (item.name.includes('(') && !existing.name.includes('(')) {
-          existing.name = item.name;
-        }
-        // If the newer one has safety warnings, append them
-        if (item.safetyWarnings && item.safetyWarnings.length > 0) {
-          existing.safetyWarnings = Array.from(new Set([...(existing.safetyWarnings || []), ...item.safetyWarnings]));
-        }
-      } else {
-        merged.push({ ...item });
-      }
-    });
-    return sortFlavors(merged);
+    return sortFlavors(inventory);
   }, [inventory, sortBy]);
   const sortedShoppingList = useMemo(() => sortFlavors(shoppingList), [shoppingList, sortBy]);
   const sortedMissing = useMemo(() => {
@@ -5863,19 +6186,35 @@ function InventoryManager({
                                   </div>
                                 )}
                                 {item.volumeMl !== undefined && (
-                                  <Badge 
-                                    variant="secondary" 
-                                    className={`text-[9px] h-4 px-1.5 font-bold ${
-                                      item.volumeMl <= (userSettings.lowStockThreshold || 0)
-                                        ? 'bg-red-50 dark:bg-red-950/30 text-red-600 dark:text-red-400 border-red-100 dark:border-red-900/50'
-                                        : 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 border-none'
-                                    }`}
-                                  >
-                                    {item.volumeMl.toFixed(2)}ml
-                                    {item.volumeMl <= (userSettings.lowStockThreshold || 0) && (
-                                      <AlertTriangle className="w-2.5 h-2.5 ml-1" />
+                                  <div className="flex items-center gap-1">
+                                    <Badge 
+                                      variant="secondary" 
+                                      className={`text-[9px] h-4 px-1.5 font-bold ${
+                                        item.volumeMl <= (userSettings.lowStockThreshold || 0)
+                                          ? 'bg-red-50 dark:bg-red-950/30 text-red-600 dark:text-red-400 border-red-100 dark:border-red-900/50'
+                                          : 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 border-none'
+                                      }`}
+                                    >
+                                      {item.volumeMl.toFixed(2)}ml
+                                      {item.volumeMl <= (userSettings.lowStockThreshold || 0) && (
+                                        <AlertTriangle className="w-2.5 h-2.5 ml-1" />
+                                      )}
+                                    </Badge>
+                                    {(!item.costPerMl || item.costPerMl <= 0) && (
+                                      <TooltipProvider>
+                                        <Tooltip>
+                                          <TooltipTrigger>
+                                            <Badge variant="outline" className="text-[9px] h-4 px-1.5 bg-amber-50 dark:bg-amber-950/30 text-amber-600 dark:text-amber-400 border-amber-100 dark:border-amber-900/50 cursor-help">
+                                              <DollarSign className="w-2.5 h-2.5" />
+                                            </Badge>
+                                          </TooltipTrigger>
+                                          <TooltipContent>
+                                            <p className="text-xs">Missing cost information (Imported from ATF/ELR)</p>
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      </TooltipProvider>
                                     )}
-                                  </Badge>
+                                  </div>
                                 )}
                                 {getUsageCount(item.name) > 0 && (
                                   <div 
@@ -5890,9 +6229,9 @@ function InventoryManager({
                                   </div>
                                 )}
                               </div>
-                              {item.costPerMl && (
+                              {(item.costPerMl ?? 0) > 0 && (
                                 <span className="text-[9px] text-neutral-400 dark:text-neutral-500 font-mono mt-0.5">
-                                  ${item.costPerMl.toFixed(2)}/ml
+                                  ${item.costPerMl?.toFixed(2)}/ml
                                 </span>
                               )}
                             </div>
