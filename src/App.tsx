@@ -204,6 +204,32 @@ function sanitizeForFirestore(obj: any): any {
   return obj;
 }
 
+function normalizeFlavorName(name: string): string {
+  if (!name) return '';
+  
+  let processed = name;
+
+  // 1. Handle typical "Flavor Name (abbreviation)" format
+  const lastParenIndex = processed.lastIndexOf('(');
+  if (lastParenIndex !== -1 && processed.trim().endsWith(')')) {
+    const base = processed.substring(0, lastParenIndex).trim();
+    const man = processed.substring(lastParenIndex + 1).replace(')', '').trim();
+    // Only uppercase if it's short (likely an abbreviation) or a known one
+    if (man.length <= 6) {
+       processed = `${base} (${man.toUpperCase()})`;
+    }
+  }
+  
+  // 2. Handle standalone abbreviations or prefixes like "TPA Strawberry"
+  const manufacturers = ['tpa', 'tfa', 'cap', 'fa', 'fw', 'inw', 'la', 'jf', 'vt', 'flv', 'ssa', 'wf', 'vta'];
+  manufacturers.forEach(m => {
+    const regex = new RegExp(`\\b${m}\\b`, 'gi');
+    processed = processed.replace(regex, m.toUpperCase());
+  });
+  
+  return processed;
+}
+
 function isFlavorMatch(name1: string, name2: string): boolean {
   if (!name1 || !name2) return false;
   
@@ -656,8 +682,12 @@ function AppContent() {
     // Merge logic: Add new items, skip existing
     let addedCount = 0;
     importedItems.forEach(item => {
-      if (!inventory.some(inv => isFlavorMatch(inv.name, item.name))) {
-        internalAddInventoryItem(item);
+      const normalizedItem = {
+        ...item,
+        name: normalizeFlavorName(item.name)
+      };
+      if (!inventory.some(inv => isFlavorMatch(inv.name, normalizedItem.name))) {
+        internalAddInventoryItem(normalizedItem);
         addedCount++;
       }
     });
@@ -705,7 +735,7 @@ function AppContent() {
   }, [activeTab, cookieConsent]);
 
   // Version
-  const VERSION = "1.29.3";
+  const VERSION = "1.29.8";
 
   // History Navigation Support
   useEffect(() => {
@@ -1282,36 +1312,45 @@ function AppContent() {
   }, [user, recipes, inventory, shoppingList, orders, userSettings, costs]);
 
   const handleSaveRecipe = async (recipe: Recipe, mix?: Mix, isExplicitNewVersion: boolean = false) => {
+    // Normalize flavor names before any logic
+    const normalizedRecipe: Recipe = {
+      ...recipe,
+      flavors: recipe.flavors.map(f => ({
+        ...f,
+        name: normalizeFlavorName(f.name)
+      }))
+    };
+
     if (import.meta.env.VITE_GA_MEASUREMENT_ID) {
-      console.log('Tracking Event: save_recipe', recipe.name);
+      console.log('Tracking Event: save_recipe', normalizedRecipe.name);
       trackEvent('save_recipe', {
         category: 'Recipes',
-        source: recipe.source || 'manual',
-        recipe_name: recipe.name
+        source: normalizedRecipe.source || 'manual',
+        recipe_name: normalizedRecipe.name
       });
     }
 
     // Check for duplicates if it's a new recipe or if name/flavors changed
-    const existing = recipes.find(r => r.id === recipe.id);
-    const duplicate = checkDuplicateRecipe(recipe, recipes);
+    const existing = recipes.find(r => r.id === normalizedRecipe.id);
+    const duplicate = checkDuplicateRecipe(normalizedRecipe, recipes);
     
     // Only trigger duplicate dialog if it's NOT an explicit new version selected by the user
     if (!isExplicitNewVersion && duplicate && !existing) {
       setDuplicateFound(duplicate);
-      setPendingRecipe(recipe);
+      setPendingRecipe(normalizedRecipe);
       setPendingMix(mix || null);
       return;
     }
 
     // Update local state immediately for snappy UI
     setRecipes(prev => {
-      const index = prev.findIndex(r => r.id === recipe.id);
+      const index = prev.findIndex(r => r.id === normalizedRecipe.id);
       if (index > -1) {
         const updated = [...prev];
-        updated[index] = recipe;
+        updated[index] = normalizedRecipe;
         return updated;
       }
-      return [recipe, ...prev];
+      return [normalizedRecipe, ...prev];
     });
 
     if (mix) {
@@ -1321,9 +1360,9 @@ function AppContent() {
     if (user) {
       const uid = user.uid;
       try {
-        await withTimeout(setDoc(doc(db, 'users', uid, 'recipes', recipe.id), sanitizeForFirestore({ ...recipe, uid })));
+        await withTimeout(setDoc(doc(db, 'users', uid, 'recipes', normalizedRecipe.id), sanitizeForFirestore({ ...normalizedRecipe, uid })));
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `users/${uid}/recipes/${recipe.id}`);
+        handleFirestoreError(err, OperationType.WRITE, `users/${uid}/recipes/${normalizedRecipe.id}`);
       }
     }
     
@@ -1336,7 +1375,7 @@ function AppContent() {
     setEditingRecipe(null);
 
     // After saving, check for missing flavors to offer adding to shopping list
-    const missing = recipe.flavors
+    const missing = normalizedRecipe.flavors
       .map(f => f.name)
       .filter(name => !inventory.some(inv => isFlavorMatch(inv.name, name)))
       .filter(name => !shoppingList.some(s => isFlavorMatch(s.name, name)));
@@ -1482,7 +1521,7 @@ function AppContent() {
       vendor,
       items: items.map(item => ({
         id: Math.random().toString(36).substr(2, 9),
-        name: item.name,
+        name: normalizeFlavorName(item.name),
         volumeMl: item.volumeMl,
         price: item.price
       })),
@@ -1717,15 +1756,21 @@ function AppContent() {
   };
 
   const addInventoryItem = async (item: InventoryFlavor) => {
-    const duplicate = inventory.find(i => isFlavorMatch(i.name, item.name));
+    // Normalize name before check and add
+    const normalizedItem = {
+      ...item,
+      name: normalizeFlavorName(item.name)
+    };
+    
+    const duplicate = inventory.find(i => isFlavorMatch(i.name, normalizedItem.name));
     if (duplicate) {
       setDuplicateInventoryFound(duplicate);
-      setPendingInventoryItem(item);
+      setPendingInventoryItem(normalizedItem);
       setPendingInvoiceItems([]); // Clear invoice queue if adding manually
       return;
     }
 
-    await internalAddInventoryItem(item);
+    await internalAddInventoryItem(normalizedItem);
   };
 
   const removeInventoryItem = async (name: string, bypassConfirm: boolean = false) => {
@@ -1868,16 +1913,22 @@ function AppContent() {
   };
 
   const addShoppingItem = async (item: ShoppingItem) => {
-    if (shoppingList.some(s => isFlavorMatch(s.name, item.name))) {
+    // Normalize name before check and add
+    const normalizedItem = {
+      ...item,
+      name: normalizeFlavorName(item.name)
+    };
+
+    if (shoppingList.some(s => isFlavorMatch(s.name, normalizedItem.name))) {
       return; // Already exists
     }
-    setShoppingList(prev => [...prev, item]);
+    setShoppingList(prev => [...prev, normalizedItem]);
     if (user) {
       const uid = user.uid;
       try {
-        await withTimeout(setDoc(doc(db, 'users', uid, 'shoppingList', item.id), sanitizeForFirestore({ ...item, uid })));
+        await withTimeout(setDoc(doc(db, 'users', uid, 'shoppingList', normalizedItem.id), sanitizeForFirestore({ ...normalizedItem, uid })));
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `users/${uid}/shoppingList/${item.id}`);
+        handleFirestoreError(err, OperationType.WRITE, `users/${uid}/shoppingList/${normalizedItem.id}`);
       }
     }
   };
@@ -3168,11 +3219,11 @@ function ImportRecipeDialog({
       const parsed = await parseImportedRecipe(content, userSettings.geminiApiKey);
       
       if (!parsed.recipeFound || !parsed.flavors || parsed.flavors.length === 0) {
-        throw new Error("Could not find a valid e-liquid recipe in the pasted text. Please make sure you copied the flavor list and percentages.");
+        throw new Error(`Could not find a valid e-liquid recipe in the pasted text. Please make sure you copied the ${flavors()} list and percentages.`);
       }
 
       // Destructure to remove recipeFound and prepare flavors with IDs
-      const { recipeFound, flavors, ...recipeData } = parsed;
+      const { recipeFound, flavors: parsedFlavors, ...recipeData } = parsed;
 
       const newRecipe: Recipe = {
         servingMl: userSettings.defaultServingMl,
@@ -3181,8 +3232,9 @@ function ImportRecipeDialog({
         nicBaseMg: userSettings.defaultNicBaseMg,
         nicBaseType: userSettings.defaultNicBaseType,
         ...recipeData,
-        flavors: flavors.map((f: any) => ({
+        flavors: parsedFlavors.map((f: any) => ({
           ...f,
+          name: normalizeFlavorName(f.name),
           id: Math.random().toString(36).substr(2, 9)
         })),
         id: Math.random().toString(36).substr(2, 9),
@@ -3338,7 +3390,7 @@ function ImportInvoiceDialog({
       const parsed = await parseInvoice(content, userSettings.geminiApiKey);
       
       if (!parsed.items || parsed.items.length === 0) {
-        throw new Error("Could not find any flavor items in the provided content. Please make sure the text contains the item list, volumes, and prices.");
+        throw new Error(`Could not find any ${flavor()} items in the provided content. Please make sure the text contains the item list, volumes, and prices.`);
       }
 
       // Duplicate check
@@ -3610,6 +3662,47 @@ function DuplicateInventoryDialog({
 
 const VERSION_HISTORY = [
   {
+    version: "1.29.8",
+    date: "May 12, 2026",
+    changes: [
+      "Stash Import: Extended support to include .csv.html files and updated the file picker to ensure compatibility with various platform export behaviors.",
+      "Security: Hardened sanitization to strictly strip HTML tags from imported flavor names and notes.",
+      "UI: Updated import instructions to guide users on different file types and improved stash import robustness."
+    ]
+  },
+  {
+    version: "1.29.7",
+    date: "May 11, 2026",
+    changes: [
+      "Mixing Precision: Enhanced drop calculations with viscosity-based estimation (PG/VG weighted).",
+      "Flavor Breakdown: Added drop counts for all flavors in mixing results for easier manual mixing."
+    ]
+  },
+  {
+    version: "1.29.6",
+    date: "May 10, 2026",
+    changes: [
+      "Manufacturer Normalization: Enhanced normalization logic to catch lowercase abbreviations in all display areas, even for older signatures.",
+      "UI Consistency: Applied real-time normalization to flavor names in mix results, recipe cards, and history logs."
+    ]
+  },
+  {
+    version: "1.29.5",
+    date: "May 10, 2026",
+    changes: [
+      "Manufacturer Normalization: Implemented automatic uppercase conversion for manufacturer abbreviations (TFA, CAP, FA, etc.) across recipes, stash, and imports.",
+      "Data Consistency: Added global name normalization to ensure manufacturer abbreviations are consistently formatted in both UI and exports."
+    ]
+  },
+  {
+    version: "1.29.4",
+    date: "May 7, 2026",
+    changes: [
+      "Recipe Editor Fix: Resolved a critical 'X is not a function' error caused by variable shadowing in the recipe editor's flavor list.",
+      "Scope Management: Optimized internal variable scoring to prevent naming collisions between localize helpers and loop iterators."
+    ]
+  },
+  {
     version: "1.29.3",
     date: "May 6, 2026",
     changes: [
@@ -3841,7 +3934,7 @@ function MixHistoryDialog({
 
                   <div className="space-y-1.5">
                     <textarea
-                      placeholder="Add notes about this batch (flavor profile, smoothness, etc.)"
+                      placeholder={`Add notes about this batch (${flavor()} profile, smoothness, etc.)`}
                       className="w-full text-[11px] bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded p-2 focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[50px] resize-none"
                       value={mix.notes || ''}
                       onChange={(e) => onUpdateNotes?.(mix.id, e.target.value)}
@@ -3873,7 +3966,7 @@ function MixHistoryDialog({
                       return (
                         <div key={f.id || f.name} className="flex justify-between text-xs">
                           <span className="text-neutral-600 dark:text-neutral-400 text-[11px] flex items-center gap-1.5">
-                            {f.name}
+                            {normalizeFlavorName(f.name)}
                             {f.isSubstitution && (
                               <span className="text-[9px] text-amber-600 dark:text-amber-500 font-medium italic">
                                 (Substituted)
@@ -4104,7 +4197,7 @@ function RecipeCard({
                     >
                       <Badge variant="secondary" className={`text-[10px] font-normal border ${badgeClass} inline-flex items-center gap-1 transition-opacity h-[20px] ${hasAnyNotes ? 'rounded-r-none border-r-0' : ''}`}>
                         {Icon && <Icon className="w-2.5 h-2.5" />}
-                        {f.name} ({f.percentage}%)
+                        {normalizeFlavorName(f.name)} ({f.percentage}%)
                       </Badge>
                     </button>
                     {hasAnyNotes && (
@@ -4306,8 +4399,10 @@ function FlavorSearchInput({
                   className="w-full text-left px-3 py-2 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-sm flex items-center justify-between"
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    onChange(item.name, item.costPerMl);
-                    setSearch(item.name);
+                    // Normalize selected name just in case
+                    const normalizedName = normalizeFlavorName(item.name);
+                    onChange(normalizedName, item.costPerMl);
+                    setSearch(normalizedName);
                     setIsOpen(false);
                   }}
                 >
@@ -4715,15 +4810,21 @@ function RecipeEditor({
       ...prev,
       flavors: prev.flavors.map(f => {
         if (f.id === id) {
-          const updated = { ...f, ...updates };
+          // Normalize name if it's being updated
+          const finalUpdates = { ...updates };
+          if (finalUpdates.name !== undefined) {
+            finalUpdates.name = normalizeFlavorName(finalUpdates.name);
+          }
+          
+          const updated = { ...f, ...finalUpdates };
           // If name changed, check for safety warnings and cost
-          if (updates.name !== undefined) {
+          if (finalUpdates.name !== undefined) {
             // Check safety warnings
-            updated.safetyWarnings = getSafetyWarnings(updates.name);
+            updated.safetyWarnings = getSafetyWarnings(finalUpdates.name);
 
             // Try to find cost in stash if not provided
-            if (updates.costPerMl === undefined) {
-              const stashFlavor = inventory.find(inv => isFlavorMatch(inv.name, updates.name || ''));
+            if (finalUpdates.costPerMl === undefined) {
+              const stashFlavor = inventory.find(inv => isFlavorMatch(inv.name, finalUpdates.name || ''));
               if (stashFlavor?.costPerMl) {
                 updated.costPerMl = stashFlavor.costPerMl;
               }
@@ -4998,12 +5099,12 @@ function RecipeEditor({
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400 dark:text-neutral-500 text-center">Notes</span>
                 <span></span>
               </div>
-              {formData.flavors.map((flavor, index) => {
-                const isInStock = inventory.some(inv => isFlavorMatch(inv.name, flavor.name));
-                const isOnShoppingList = shoppingList.some(item => isFlavorMatch(item.name, flavor.name));
-                const isInOrder = orders.some(o => o.status === 'pending' && o.items.some(oi => isFlavorMatch(oi.name, flavor.name)));
-                const substitutes = !isInStock ? findSubstitutes(flavor.name, inventory) : [];
-                const flavorKey = `edit-${flavor.id || flavor.name}-${index}`;
+              {formData.flavors.map((f, index) => {
+                const isInStock = inventory.some(inv => isFlavorMatch(inv.name, f.name));
+                const isOnShoppingList = shoppingList.some(item => isFlavorMatch(item.name, f.name));
+                const isInOrder = orders.some(o => o.status === 'pending' && o.items.some(oi => isFlavorMatch(oi.name, f.name)));
+                const substitutes = !isInStock ? findSubstitutes(f.name, inventory) : [];
+                const flavorKey = `edit-${f.id || f.name}-${index}`;
                 const expansionKey = `notes-${flavorKey}`;
                 
                 return (
@@ -5011,7 +5112,7 @@ function RecipeEditor({
                     <div className="grid grid-cols-[1fr_55px_65px_40px_40px] gap-2 items-start px-1">
                       <div className="relative">
                         <FlavorSearchInput 
-                          value={flavor.name || ''} 
+                          value={f.name || ''} 
                           inventory={inventory}
                           shoppingList={shoppingList}
                           onChange={(name, cost) => {
@@ -5020,46 +5121,46 @@ function RecipeEditor({
                             // If we are changing name, reset substitution status
                             updates.isSubstitution = false;
                             updates.originalName = undefined;
-                            updateFlavor(flavor.id, updates);
+                            updateFlavor(f.id, updates);
                           }}
                           onAddShoppingList={(name) => {
                             if (!shoppingList.some(i => isFlavorMatch(i.name, name))) {
                               const newFlavor = { name };
                               onStartEditingFlavor(newFlavor, 'shopping');
                             }
-                            updateFlavor(flavor.id, { name, isSubstitution: false, originalName: undefined });
+                            updateFlavor(f.id, { name, isSubstitution: false, originalName: undefined });
                           }}
                           onAddToStash={(name) => {
                             if (!inventory.some(i => isFlavorMatch(i.name, name))) {
                               const newFlavor = { name };
                               onStartEditingFlavor(newFlavor, 'stash');
                             }
-                            updateFlavor(flavor.id, { name, isSubstitution: false, originalName: undefined });
+                            updateFlavor(f.id, { name, isSubstitution: false, originalName: undefined });
                           }}
                         />
                       </div>
                       <Input 
                         type="number" 
                         placeholder="%" 
-                        value={flavor.percentage || ''} 
-                        onChange={(e) => updateFlavor(flavor.id, { percentage: e.target.value === '' ? 0 : Number(e.target.value) })}
+                        value={f.percentage || ''} 
+                        onChange={(e) => updateFlavor(f.id, { percentage: e.target.value === '' ? 0 : Number(e.target.value) })}
                         className="h-9 text-center dark:bg-neutral-900 px-1"
                       />
                       <Tooltip>
                         <TooltipTrigger
                           onClick={() => {
-                            const stashFlavor = inventory.find(inv => isFlavorMatch(inv.name, flavor.name));
+                            const stashFlavor = inventory.find(inv => isFlavorMatch(inv.name, f.name));
                             if (stashFlavor) {
                               onStartEditingFlavor(stashFlavor, undefined, 'cost');
                             } else {
                               // If not in stash, offer to add it
-                              onStartEditingFlavor({ name: flavor.name }, 'stash', 'cost');
+                              onStartEditingFlavor({ name: f.name }, 'stash', 'cost');
                             }
                           }}
                           className="w-full h-9 bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md flex flex-col items-center justify-center cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors px-1"
                         >
                           <span className="font-mono font-medium text-[11px] truncate text-neutral-600 dark:text-neutral-300">
-                            {flavor.costPerMl !== undefined ? `$${flavor.costPerMl.toFixed(2)}` : 'N/A'}
+                            {f.costPerMl !== undefined ? `$${f.costPerMl.toFixed(2)}` : 'N/A'}
                           </span>
                         </TooltipTrigger>
                         <TooltipContent>
@@ -5078,7 +5179,7 @@ function RecipeEditor({
                         variant="ghost" 
                         size="icon" 
                         className="mx-auto h-9 w-9 text-neutral-400 dark:text-neutral-500 shrink-0" 
-                        onClick={() => setFlavorToDelete(flavor.id)}
+                        onClick={() => setFlavorToDelete(f.id)}
                       >
                         <X className="w-4 h-4" />
                       </Button>
@@ -5096,49 +5197,49 @@ function RecipeEditor({
                           <div className="space-y-1">
                             <Label className="text-[9px] uppercase tracking-wider text-neutral-400 dark:text-neutral-500 font-bold">Recipe Note</Label>
                             <textarea
-                              value={flavor.notes || ''}
-                              onChange={(e) => updateFlavor(flavor.id, { notes: e.target.value })}
+                              value={f.notes || ''}
+                              onChange={(e) => updateFlavor(f.id, { notes: e.target.value })}
                               placeholder={`Specific notes for this ${flavor()} in this recipe...`}
                               className="w-full min-h-[60px] p-2 text-xs rounded-md border border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/30 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all resize-none"
                             />
                           </div>
-                          {inventory.find(inv => isFlavorMatch(inv.name, flavor.name))?.notes && (
+                          {inventory.find(inv => isFlavorMatch(inv.name, f.name))?.notes && (
                             <div className="space-y-1 p-2 rounded-md bg-blue-50/30 dark:bg-blue-900/10 border border-blue-100/30 dark:border-blue-900/20">
                               <Label className="text-[9px] uppercase tracking-wider text-blue-500/70 font-bold flex items-center gap-1">
                                 <StickyNote className="w-2 h-2" /> Stash Note Reference
                               </Label>
                               <p className="text-[11px] text-neutral-600 dark:text-neutral-400 italic leading-relaxed">
-                                {inventory.find(inv => isFlavorMatch(inv.name, flavor.name))?.notes}
+                                {inventory.find(inv => isFlavorMatch(inv.name, f.name))?.notes}
                               </p>
                             </div>
                           )}
                         </motion.div>
                       )}
                     </AnimatePresence>
-                    {flavor.name && (
+                    {f.name && (
                       <div className="flex flex-col gap-1 px-1">
                         <div className="flex items-center gap-2">
                           {isInStock ? (
                             <div className="flex items-center gap-2">
                               <Badge variant="secondary" className="text-[9px] bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 border-none flex items-center gap-1">
-                                {flavor.isSubstitution ? 'Substituted' : 'In Stash'}
+                                {f.isSubstitution ? 'Substituted' : 'In Stash'}
                               </Badge>
-                              {flavor.isSubstitution && (
+                              {f.isSubstitution && (
                                 <Button 
                                   variant="ghost" 
                                   size="sm" 
                                   className="h-5 text-[9px] px-1.5 text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 gap-1"
                                   onClick={() => {
-                                    if (flavor.originalName) {
-                                      updateFlavor(flavor.id, { 
-                                        name: flavor.originalName, 
+                                    if (f.originalName) {
+                                      updateFlavor(f.id, { 
+                                        name: f.originalName, 
                                         isSubstitution: false, 
                                         originalName: undefined 
                                       });
                                     }
                                   }}
                                 >
-                                  Revert to {flavor.originalName}
+                                  Revert to {f.originalName}
                                 </Button>
                               )}
                               {!isOnShoppingList && (
@@ -5149,7 +5250,7 @@ function RecipeEditor({
                                   onClick={() => {
                                     onAddShoppingItem({
                                       id: Math.random().toString(36).substr(2, 9),
-                                      name: flavor.name,
+                                      name: f.name,
                                       addedAt: Date.now()
                                     });
                                   }}
@@ -5177,7 +5278,7 @@ function RecipeEditor({
                                   onClick={() => {
                                     onAddShoppingItem({
                                       id: Math.random().toString(36).substr(2, 9),
-                                      name: flavor.name,
+                                      name: f.name,
                                       addedAt: Date.now()
                                     });
                                   }}
@@ -5210,12 +5311,12 @@ function RecipeEditor({
                                       name: sub.flavor.name,
                                       costPerMl: sub.flavor.costPerMl,
                                       isSubstitution: true,
-                                      originalName: flavor.originalName || flavor.name
+                                      originalName: f.originalName || f.name
                                     };
                                     if (sub.multiplier !== 1) {
-                                      updates.percentage = Number((flavor.percentage * sub.multiplier).toFixed(2));
+                                      updates.percentage = Number((f.percentage * sub.multiplier).toFixed(2));
                                     }
-                                    updateFlavor(flavor.id, updates);
+                                    updateFlavor(f.id, updates);
                                   }}
                                 >
                                   Use {sub.flavor.name} {sub.multiplier !== 1 ? `(${sub.multiplier}x qty)` : ''}
@@ -5251,6 +5352,7 @@ function RecipeEditor({
                   color="text-red-400" 
                   preference={userSettings.mixingPreference} 
                   cost={results.nicotineMl * costs.nicCostPerMl}
+                  pgRatio={formData.nicBasePgRatio !== undefined ? formData.nicBasePgRatio : (formData.nicBaseType === 'PG' ? 100 : 0)}
                 />
                 <ResultItem 
                   label="PG" 
@@ -5259,6 +5361,7 @@ function RecipeEditor({
                   color="text-blue-400" 
                   preference={userSettings.mixingPreference} 
                   cost={results.pgMl * costs.pgCostPerMl}
+                  pgRatio={100}
                 />
                 <ResultItem 
                   label="VG" 
@@ -5267,6 +5370,7 @@ function RecipeEditor({
                   color="text-green-400" 
                   preference={userSettings.mixingPreference} 
                   cost={results.vgMl * costs.vgCostPerMl}
+                  pgRatio={0}
                 />
                 <ResultItem 
                   label="Total" 
@@ -5276,6 +5380,7 @@ function RecipeEditor({
                   bold 
                   preference={userSettings.mixingPreference} 
                   cost={results.totalCost}
+                  pgRatio={formData.targetPgRatio}
                 />
               </div>
               
@@ -5334,7 +5439,7 @@ function RecipeEditor({
                         >
                             <div className="flex items-center gap-2">
                               <span className="text-neutral-300 leading-tight group-hover/item:text-blue-400 transition-colors">
-                                {f.name || `Unnamed ${flavor()}`}
+                                {normalizeFlavorName(f.name) || `Unnamed ${flavor()}`}
                                 <span className="text-[10px] text-neutral-500 ml-1">({f.percentage.toFixed(2)}%)</span>
                               </span>
                               {isInOrder && !isInStock && (
@@ -5458,7 +5563,7 @@ function RecipeEditor({
                                 </div>
                               </div>
                               <div className="text-[10px] text-neutral-500 leading-none">
-                                {f.grams.toFixed(2)}g • ${((f.ml * (stashFlavor?.costPerMl || formData.flavors.find(fl => fl.id === f.id)?.costPerMl || averageFlavorCost))).toFixed(2)}
+                                {f.grams.toFixed(2)}g • {Math.round(f.ml * 38)} drops • ${((f.ml * (stashFlavor?.costPerMl || formData.flavors.find(fl => fl.id === f.id)?.costPerMl || averageFlavorCost))).toFixed(2)}
                               </div>
                             </div>
                           ) : (
@@ -5497,7 +5602,7 @@ function RecipeEditor({
                                 </div>
                               </div>
                               <div className="text-[10px] text-neutral-500 leading-none">
-                                {f.ml.toFixed(2)}ml • ${((f.ml * (stashFlavor?.costPerMl || formData.flavors.find(fl => fl.id === f.id)?.costPerMl || averageFlavorCost))).toFixed(2)}
+                                {f.ml.toFixed(2)}ml • {Math.round(f.ml * 38)} drops • ${((f.ml * (stashFlavor?.costPerMl || formData.flavors.find(fl => fl.id === f.id)?.costPerMl || averageFlavorCost))).toFixed(2)}
                               </div>
                             </div>
                           )}
@@ -5697,8 +5802,43 @@ function RecipeEditor({
   );
 }
 
-function ResultItem({ label, ml, grams, color, bold, preference = 'weight', cost }: { label: string, ml: number, grams: number, color: string, bold?: boolean, preference?: 'weight' | 'volume', cost?: number }) {
-  const drops = Math.round(ml * 38);
+function ResultItem({ 
+  label, 
+  ml, 
+  grams, 
+  color, 
+  bold, 
+  preference = 'weight', 
+  cost,
+  pgRatio,
+  vgRatio
+}: { 
+  label: string, 
+  ml: number, 
+  grams: number, 
+  color: string, 
+  bold?: boolean, 
+  preference?: 'weight' | 'volume', 
+  cost?: number,
+  pgRatio?: number,
+  vgRatio?: number
+}) {
+  // Viscosity-based drop calculation
+  // PG: ~38 drops/ml, VG: ~24 drops/ml
+  let p = pgRatio;
+  let v = vgRatio;
+
+  if (p === undefined && v === undefined) {
+    if (label.includes('PG')) { p = 100; v = 0; }
+    else if (label.includes('VG')) { p = 0; v = 100; }
+    else { p = 100; v = 0; } // Default (Total, Flavors)
+  } else {
+    p = p ?? (100 - (v ?? 0));
+    v = v ?? (100 - p);
+  }
+
+  const dpm = (p / 100 * 38) + (v / 100 * 24);
+  const drops = Math.round(ml * dpm);
   const isWeight = preference === 'weight';
   
   return (
@@ -7965,8 +8105,8 @@ function StashImportDialog({
               notes: f.notes || ''
             };
           });
-        } else if (file.name.toLowerCase().endsWith('.csv')) {
-          // ELR or ATF CSV
+        } else if (file.name.toLowerCase().endsWith('.csv') || file.name.toLowerCase().endsWith('.csv.html')) {
+          // ELR or ATF CSV (Android sometimes appends .html to .csv downloads)
           Papa.parse(content, {
             header: true,
             skipEmptyLines: true,
@@ -8076,7 +8216,7 @@ function StashImportDialog({
                 type="file" 
                 ref={fileInputRef} 
                 onChange={handleFileChange} 
-                accept=".json,.csv" 
+                accept=".json,.csv,.html" 
                 className="hidden" 
               />
             </div>
