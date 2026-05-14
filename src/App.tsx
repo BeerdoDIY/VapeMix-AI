@@ -86,7 +86,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Recipe, Flavor, IngredientCost, UserSettings, CalculationResult, InventoryFlavor, ShoppingItem, Mix, Order } from './types';
 import { calculateRecipe } from './lib/calculations';
-import { suggestRecipes, parseImportedRecipe, parseInvoice } from './services/geminiService';
+import { suggestRecipes, parseImportedRecipe, parseInvoice, resetGeminiService } from './services/geminiService';
 import { getSafetyWarnings, formatSafetyWarnings, getPotencyWarning } from './lib/safety';
 import { 
   auth, 
@@ -182,7 +182,7 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   throw new Error(JSON.stringify(errInfo));
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 30000): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 60000): Promise<T> {
   return Promise.race([
     promise,
     new Promise<T>((_, reject) => 
@@ -204,30 +204,111 @@ function sanitizeForFirestore(obj: any): any {
   return obj;
 }
 
+const MANUFACTURER_EXPANSIONS: Record<string, string> = {
+  'the flavor apprentice': 'TPA',
+  'tfa': 'TPA',
+  'tpa': 'TPA',
+  'capella': 'CAP',
+  'cap': 'CAP',
+  'flavourart': 'FA',
+  'flavour art': 'FA',
+  'fa': 'FA',
+  'flavor west': 'FW',
+  'flavorwest': 'FW',
+  'fw': 'FW',
+  'inawera': 'INW',
+  'inw': 'INW',
+  'lorann oils': 'LA',
+  'lorann': 'LA',
+  'la': 'LA',
+  'jungle flavors': 'JF',
+  'jf': 'JF',
+  'vape train australia': 'VT',
+  'vape train': 'VT',
+  'vta': 'VT',
+  'vt': 'VT',
+  'flavorah': 'FLV',
+  'flv': 'FLV',
+  'sobucky super aroma': 'SSA',
+  'sobucky': 'SSA',
+  'ssa': 'SSA',
+  'wonder flavours': 'WF',
+  'wonder flavors': 'WF',
+  'wf': 'WF',
+  'real flavors': 'RF',
+  'rf': 'RF',
+  'one on one': 'OOO',
+  'ooo': 'OOO',
+  'molinberry': 'MB',
+  'mb': 'MB',
+  'chemnovatic': 'CNV',
+  'cnv': 'CNV',
+  'liquid barn': 'LB',
+  'lb': 'LB',
+  'hangsen': 'HS',
+  'hs': 'HS',
+  'medicine flower': 'MF',
+  'mf': 'MF',
+};
+
 function normalizeFlavorName(name: string): string {
   if (!name) return '';
   
-  let processed = name;
+  let processed = name.trim();
 
-  // 1. Handle typical "Flavor Name (abbreviation)" format
-  const lastParenIndex = processed.lastIndexOf('(');
-  if (lastParenIndex !== -1 && processed.trim().endsWith(')')) {
-    const base = processed.substring(0, lastParenIndex).trim();
-    const man = processed.substring(lastParenIndex + 1).replace(')', '').trim();
-    // Only uppercase if it's short (likely an abbreviation) or a known one
+  // Special handling for WS-23 variations
+  const ws23Pattern = /ws[-\s]?23(\s*(cooling\s*agent|cooler))?/i;
+  if (ws23Pattern.test(processed)) {
+    processed = processed.replace(ws23Pattern, 'WS-23');
+  }
+
+  // Try to find if manufacturer is already in parentheses
+  const parenMatch = processed.match(/\s*\(([^)]+)\)$/);
+  const toTitleCase = (str: string) => {
+    return str.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+  };
+
+  if (parenMatch) {
+    const base = toTitleCase(processed.substring(0, parenMatch.index).trim());
+    const man = parenMatch[1].trim();
+    
+    // Check if it's a known manufacturer code or needs expansion
+    const lowerMan = man.toLowerCase();
+    for (const [key, code] of Object.entries(MANUFACTURER_EXPANSIONS)) {
+      if (lowerMan === key || lowerMan === code.toLowerCase()) {
+        return `${base} (${code})`;
+      }
+    }
+    // If not found in expansions, just uppercase it if it's short
     if (man.length <= 6) {
-       processed = `${base} (${man.toUpperCase()})`;
+      return `${base} (${man.toUpperCase()})`;
+    }
+    return `${base} (${man})`;
+  }
+
+  // Not in parentheses, try to find at start or end
+  const lowerName = processed.toLowerCase();
+  
+  // Sort expansions by length descending to match longest first (e.g. "Flavour Art" before "FA")
+  const sortedKeys = Object.keys(MANUFACTURER_EXPANSIONS).sort((a, b) => b.length - a.length);
+  
+  for (const key of sortedKeys) {
+    const code = MANUFACTURER_EXPANSIONS[key];
+    
+    // Case 1: At the start (e.g. "CAP Harvest Berry")
+    if (lowerName.startsWith(key + ' ')) {
+      const rest = processed.substring(key.length).trim();
+      return `${toTitleCase(rest)} (${code})`;
+    }
+    
+    // Case 2: At the end (e.g. "Harvest Berry CAP")
+    if (lowerName.endsWith(' ' + key)) {
+      const rest = processed.substring(0, processed.length - key.length).trim();
+      return `${toTitleCase(rest)} (${code})`;
     }
   }
-  
-  // 2. Handle standalone abbreviations or prefixes like "TPA Strawberry"
-  const manufacturers = ['tpa', 'tfa', 'cap', 'fa', 'fw', 'inw', 'la', 'jf', 'vt', 'flv', 'ssa', 'wf', 'vta'];
-  manufacturers.forEach(m => {
-    const regex = new RegExp(`\\b${m}\\b`, 'gi');
-    processed = processed.replace(regex, m.toUpperCase());
-  });
-  
-  return processed;
+
+  return toTitleCase(processed);
 }
 
 function isFlavorMatch(name1: string, name2: string): boolean {
@@ -236,28 +317,14 @@ function isFlavorMatch(name1: string, name2: string): boolean {
   const getTokens = (s: string) => {
     let res = s.toLowerCase().trim();
     
-    // Expand common abbreviations/names
-    const expansions: Record<string, string> = {
-      'the flavor apprentice': 'tpa',
-      'tfa': 'tpa',
-      'capella': 'cap',
-      'flavourart': 'fa',
-      'flavour art': 'fa',
-      'flavor west': 'fw',
-      'flavorwest': 'fw',
-      'inawera': 'inw',
-      'lorann oils': 'la',
-      'lorann': 'la',
-      'jungle flavors': 'jf',
-      'vape train australia': 'vt',
-      'vape train': 'vt',
-      'flavorah': 'flv',
-      'sobucky super aroma': 'ssa',
-      'sobucky': 'ssa',
-      'wonder flavours': 'wf'
-    };
-
-    Object.entries(expansions).forEach(([full, short]) => {
+    // Normalize WS-23 variations to a single token for matching
+    res = res.replace(/ws[-\s]?23(\s*(cooling\s*agent|cooler))?/g, 'ws23');
+    
+    // Expand common abbreviations/names using our consolidated list
+    const sortedKeys = Object.keys(MANUFACTURER_EXPANSIONS).sort((a, b) => b.length - a.length);
+    
+    sortedKeys.forEach(full => {
+      const short = MANUFACTURER_EXPANSIONS[full].toLowerCase();
       // Use regex to replace full names with short codes, ensuring boundary checks
       const escaped = full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       res = res.replace(new RegExp(`\\b${escaped}\\b`, 'g'), short);
@@ -278,13 +345,13 @@ function isFlavorMatch(name1: string, name2: string): boolean {
 
   // Partial match: if one's tokens are a subset of the other's, AND the shared tokens 
   // contain a known manufacturer, they are likely the same.
-  // Actually, let's keep it simple: if they match without manufacturer tokens, they are likely the same flavor.
-  const manufacturers = ['tpa', 'tfa', 'cap', 'fa', 'fw', 'inw', 'la', 'jf', 'vt', 'flv', 'ssa', 'wf'];
-  const base1 = tokens1.filter(t => !manufacturers.includes(t)).join('');
-  const base2 = tokens2.filter(t => !manufacturers.includes(t)).join('');
+  const knownCodes = Array.from(new Set(Object.values(MANUFACTURER_EXPANSIONS))).map(v => v.toLowerCase());
   
-  const man1 = tokens1.find(t => manufacturers.includes(t));
-  const man2 = tokens2.find(t => manufacturers.includes(t));
+  const base1 = tokens1.filter(t => !knownCodes.includes(t)).join('');
+  const base2 = tokens2.filter(t => !knownCodes.includes(t)).join('');
+  
+  const man1 = tokens1.find(t => knownCodes.includes(t));
+  const man2 = tokens2.find(t => knownCodes.includes(t));
 
   // If both have the same base name AND (same manufacturer or one is missing)
   if (base1.length > 2 && base1 === base2) {
@@ -667,11 +734,19 @@ function AppContent() {
   const [pendingMix, setPendingMix] = useState<Mix | null>(null);
   const [pendingTab, setPendingTab] = useState<string | null>(null);
 
-  const startEditing = (item: InventoryFlavor, target?: 'stash' | 'shopping', focusField?: string) => {
+  const startEditing = useCallback((item: InventoryFlavor, target?: 'stash' | 'shopping', focusField?: string) => {
     setPendingAddTarget(target || null);
     setInitialFocusField(focusField || null);
     setEditingItem(item);
-  };
+  }, []);
+
+  const handleFilterRecipes = useCallback((filter: string) => {
+    setSearchQuery(filter);
+    setActiveTab('recipes');
+  }, []);
+
+  const openInvoiceImport = useCallback(() => setIsInvoiceImporting(true), []);
+  const openStashImport = useCallback(() => setIsStashImporting(true), []);
   const [recipeToDelete, setRecipeToDelete] = useState<Recipe | null>(null);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [isImporting, setIsImporting] = useState(false);
@@ -699,6 +774,7 @@ function AppContent() {
   const [pendingInvoiceItems, setPendingInvoiceItems] = useState<InventoryFlavor[]>([]);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [flavorToAddChoice, setFlavorToAddChoice] = useState<string | null>(null);
   const [aiSuggestions, setAiSuggestions] = useState<any[]>([]);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [isAppLoading, setIsAppLoading] = useState(true);
@@ -710,7 +786,6 @@ function AppContent() {
     return saved ? JSON.parse(saved) : null;
   });
   const [runtimeKey, setRuntimeKey] = useState<string | null>(null);
-  const [hasAiStudio, setHasAiStudio] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
 
   // Initialize GA4
@@ -735,7 +810,7 @@ function AppContent() {
   }, [activeTab, cookieConsent]);
 
   // Version
-  const VERSION = "1.29.8";
+  const VERSION = "1.30.8";
 
   // History Navigation Support
   useEffect(() => {
@@ -897,20 +972,6 @@ function AppContent() {
     };
   }, []);
 
-  // Proactive sync when user logs in
-  useEffect(() => {
-    if (user && isAuthReady) {
-      // Trigger sync if we have ANY data that might not be in the cloud
-      // Being a bit more aggressive here to ensure data consistency
-      const hasPotentiallyUnsyncedData = recipes.length > 0 || inventory.length > 0 || orders.length > 0 || shoppingList.length > 0;
-      
-      if (hasPotentiallyUnsyncedData) {
-        console.log("User logged in with data, performing initial sync check...");
-        syncLocalToCloud();
-      }
-    }
-  }, [user, isAuthReady]); // Only on mount/login, don't loop on data changes
-
   useEffect(() => {
     if (isAuthReady) {
       localStorage.setItem('vape-orders', JSON.stringify(orders));
@@ -926,28 +987,15 @@ function AppContent() {
   // Check for AI Studio API Key
   useEffect(() => {
     const checkKey = async () => {
-      if (window.aistudio) {
-        setHasAiStudio(true);
-        const hasKey = await window.aistudio.hasSelectedApiKey();
-        if (hasKey) {
-          // In a real app we'd get the key, here we just mark it as connected
-          setRuntimeKey('AI_STUDIO_KEY');
-        }
-      }
-      
       const manual = userSettings.geminiApiKey || localStorage.getItem('manual_gemini_api_key');
-      if (manual) setRuntimeKey(manual);
+      if (manual) {
+        setRuntimeKey(manual);
+      } else {
+        setRuntimeKey(null);
+      }
     };
     checkKey();
   }, [userSettings.geminiApiKey]);
-
-  const handleSelectKey = async () => {
-    if (window.aistudio) {
-      await window.aistudio.openSelectKey();
-      const hasKey = await window.aistudio.hasSelectedApiKey();
-      if (hasKey) setRuntimeKey('AI_STUDIO_KEY');
-    }
-  };
 
   const prevUidRef = useRef<string | null>(null);
 
@@ -972,6 +1020,8 @@ function AppContent() {
       acknowledgedSafety: false
     });
     setCosts(DEFAULT_COSTS);
+    setRuntimeKey(null);
+    resetGeminiService();
     
     // Clear localStorage
     const keysToClear = [
@@ -981,7 +1031,8 @@ function AppContent() {
       'vape-user-settings',
       'vape-costs',
       'vape-mixes',
-      'vape-orders'
+      'vape-orders',
+      'manual_gemini_api_key'
     ];
     keysToClear.forEach(key => localStorage.removeItem(key));
   }, []);
@@ -1020,41 +1071,61 @@ function AppContent() {
     return () => unsubscribe();
   }, [isAuthReady, resetState, cookieConsent]);
 
-  // Persistence for all users (caching)
+  // Persistence for all users (caching) - debounced to avoid main thread lag with large data
   useEffect(() => {
-    if (isAuthReady) {
+    if (!isAuthReady) return;
+    const timer = setTimeout(() => {
       localStorage.setItem('vape-recipes-v2', JSON.stringify(recipes));
-    }
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [recipes, isAuthReady]);
 
   useEffect(() => {
-    if (isAuthReady) {
+    if (!isAuthReady) return;
+    const timer = setTimeout(() => {
       localStorage.setItem('vape-inventory-v2', JSON.stringify(inventory));
-    }
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [inventory, isAuthReady]);
 
   useEffect(() => {
-    if (isAuthReady) {
+    if (!isAuthReady) return;
+    const timer = setTimeout(() => {
       localStorage.setItem('vape-shopping-list', JSON.stringify(shoppingList));
-    }
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [shoppingList, isAuthReady]);
 
   useEffect(() => {
-    if (isAuthReady) {
+    if (!isAuthReady) return;
+    const timer = setTimeout(() => {
+      localStorage.setItem('vape-orders', JSON.stringify(orders));
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [orders, isAuthReady]);
+
+  useEffect(() => {
+    if (!isAuthReady) return;
+    const timer = setTimeout(() => {
       localStorage.setItem('vape-user-settings', JSON.stringify(userSettings));
-    }
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [userSettings, isAuthReady]);
 
   useEffect(() => {
-    if (isAuthReady) {
+    if (!isAuthReady) return;
+    const timer = setTimeout(() => {
       localStorage.setItem('vape-costs', JSON.stringify(costs));
-    }
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [costs, isAuthReady]);
 
   useEffect(() => {
-    if (isAuthReady) {
+    if (!isAuthReady) return;
+    const timer = setTimeout(() => {
       localStorage.setItem('vape-mixes', JSON.stringify(mixes));
-    }
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [mixes, isAuthReady]);
 
   // Firestore Syncing
@@ -1311,6 +1382,39 @@ function AppContent() {
     }
   }, [user, recipes, inventory, shoppingList, orders, userSettings, costs]);
 
+  // Proactive sync when user logs in
+  useEffect(() => {
+    if (user && isAuthReady) {
+      // Trigger sync if we have ANY data that might not be in the cloud
+      // Being a bit more aggressive here to ensure data consistency
+      const hasPotentiallyUnsyncedData = recipes.length > 0 || inventory.length > 0 || orders.length > 0 || shoppingList.length > 0;
+      
+      if (hasPotentiallyUnsyncedData) {
+        console.log("User logged in with data, performing initial sync check...");
+        const timer = setTimeout(syncLocalToCloud, 3000); // Wait for snapshot listeners to settle
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [user, isAuthReady, syncLocalToCloud]);
+
+  const checkStockAndOfferShoppingList = (recipe: Recipe) => {
+    const missing = recipe.flavors
+      .map(f => f.name)
+      .filter(name => !inventory.some(inv => isFlavorMatch(inv.name, name)))
+      .filter(name => !shoppingList.some(s => isFlavorMatch(s.name, name)))
+      .filter(name => {
+        // Filter out if it's already in a pending order
+        const isInPendingOrder = orders
+          .filter(o => o.status === 'pending')
+          .some(o => o.items.some(item => isFlavorMatch(item.name, name)));
+        return !isInPendingOrder;
+      });
+
+    if (missing.length > 0) {
+      setMissingFlavorsToShop(missing);
+    }
+  };
+
   const handleSaveRecipe = async (recipe: Recipe, mix?: Mix, isExplicitNewVersion: boolean = false) => {
     // Normalize flavor names before any logic
     const normalizedRecipe: Recipe = {
@@ -1375,14 +1479,7 @@ function AppContent() {
     setEditingRecipe(null);
 
     // After saving, check for missing flavors to offer adding to shopping list
-    const missing = normalizedRecipe.flavors
-      .map(f => f.name)
-      .filter(name => !inventory.some(inv => isFlavorMatch(inv.name, name)))
-      .filter(name => !shoppingList.some(s => isFlavorMatch(s.name, name)));
-
-    if (missing.length > 0) {
-      setMissingFlavorsToShop(missing);
-    }
+    checkStockAndOfferShoppingList(normalizedRecipe);
   };
 
   const handleOverwrite = async () => {
@@ -1416,6 +1513,9 @@ function AppContent() {
           handleFirestoreError(err, OperationType.WRITE, `users/${uid}/recipes/${duplicateFound.id}`);
         }
       }
+
+      // Check for missing flavors
+      checkStockAndOfferShoppingList(updatedRecipe);
     }
   };
 
@@ -1458,6 +1558,9 @@ function AppContent() {
           handleFirestoreError(err, OperationType.WRITE, `users/${uid}/recipes/${newRecipe.id}`);
         }
       }
+
+      // Check for missing flavors
+      checkStockAndOfferShoppingList(newRecipe);
     }
   };
 
@@ -1587,7 +1690,7 @@ function AppContent() {
 
     // Move items to inventory
     const inventoryUpdates = order.items.map(item => ({
-      name: item.name,
+      name: normalizeFlavorName(item.name),
       volumeMl: item.volumeMl,
       costPerMl: Number(((item.price / item.volumeMl) + shippingPerMl).toFixed(4))
     }));
@@ -1732,7 +1835,7 @@ function AppContent() {
   };
 
   // Specific handlers for better Firestore performance
-  const internalAddInventoryItem = async (item: InventoryFlavor) => {
+  const internalAddInventoryItem = useCallback(async (item: InventoryFlavor) => {
     // Check for safety warnings if not present
     if (!item.safetyWarnings || item.safetyWarnings.length === 0) {
       item.safetyWarnings = getSafetyWarnings(item.name);
@@ -1753,9 +1856,9 @@ function AppContent() {
         return newInv;
       });
     }
-  };
+  }, [user]);
 
-  const addInventoryItem = async (item: InventoryFlavor) => {
+  const addInventoryItem = useCallback(async (item: InventoryFlavor) => {
     // Normalize name before check and add
     const normalizedItem = {
       ...item,
@@ -1771,9 +1874,9 @@ function AppContent() {
     }
 
     await internalAddInventoryItem(normalizedItem);
-  };
+  }, [inventory, internalAddInventoryItem]);
 
-  const removeInventoryItem = async (name: string, bypassConfirm: boolean = false) => {
+  const removeInventoryItem = useCallback(async (name: string, bypassConfirm: boolean = false) => {
     if (!bypassConfirm) {
       const confirmed = window.confirm(`Are you sure you want to remove ${name} from your stash?`);
       if (!confirmed) return;
@@ -1798,7 +1901,7 @@ function AppContent() {
         // If it fails, onSnapshot might put it back, but that's expected for consistency
       }
     }
-  };
+  }, [user]);
 
   const promptForDepletedFlavor = (name: string) => {
     const isOnShoppingList = shoppingList.some(s => isFlavorMatch(s.name, name));
@@ -1865,7 +1968,7 @@ function AppContent() {
     ), { duration: 15000, position: 'top-right' });
   };
 
-  const updateInventoryItem = async (oldName: string, item: InventoryFlavor) => {
+  const updateInventoryItem = useCallback(async (oldName: string, item: InventoryFlavor) => {
     // Check for safety warnings if name changed or missing
     if (oldName !== item.name || !item.safetyWarnings || item.safetyWarnings.length === 0) {
       item.safetyWarnings = getSafetyWarnings(item.name);
@@ -1903,7 +2006,7 @@ function AppContent() {
         handleFirestoreError(err, OperationType.WRITE, `users/${uid}/inventory`);
       }
     }
-  };
+  }, [user, promptForDepletedFlavor]);
 
   const handleUpdateShoppingList = async (list: ShoppingItem[]) => {
     if (user) {
@@ -1912,7 +2015,7 @@ function AppContent() {
     setShoppingList(list);
   };
 
-  const addShoppingItem = async (item: ShoppingItem) => {
+  const addShoppingItem = useCallback(async (item: ShoppingItem) => {
     // Normalize name before check and add
     const normalizedItem = {
       ...item,
@@ -1931,7 +2034,7 @@ function AppContent() {
         handleFirestoreError(err, OperationType.WRITE, `users/${uid}/shoppingList/${normalizedItem.id}`);
       }
     }
-  };
+  }, [user, shoppingList]);
 
   const handleRecordMix = async (mix: Mix) => {
     if (import.meta.env.VITE_GA_MEASUREMENT_ID) {
@@ -2007,7 +2110,7 @@ function AppContent() {
     }
   };
 
-  const removeShoppingItem = async (id: string) => {
+  const removeShoppingItem = useCallback(async (id: string) => {
     setShoppingList(prev => prev.filter(i => i.id !== id));
     if (user) {
       const uid = user.uid;
@@ -2017,9 +2120,13 @@ function AppContent() {
         handleFirestoreError(err, OperationType.DELETE, `users/${uid}/shoppingList/${id}`);
       }
     }
-  };
+  }, [user]);
 
-  const clearShoppingList = async () => {
+  const clearShoppingList = useCallback(async () => {
+    if (shoppingList.length === 0) return;
+    const confirmed = window.confirm("Are you sure you want to clear your entire shopping list?");
+    if (!confirmed) return;
+    
     const oldList = [...shoppingList];
     setShoppingList([]);
     if (user) {
@@ -2034,7 +2141,7 @@ function AppContent() {
         handleFirestoreError(err, OperationType.DELETE, `users/${uid}/shoppingList`);
       }
     }
-  };
+  }, [user, shoppingList]);
 
   const handleUpdateCosts = async (newCosts: IngredientCost) => {
     setCosts(newCosts);
@@ -2302,6 +2409,7 @@ function AppContent() {
     });
     setCosts(DEFAULT_COSTS);
     setRuntimeKey(null);
+    resetGeminiService();
 
     alert('All data has been deleted successfully.');
   };
@@ -2788,12 +2896,12 @@ function AppContent() {
                     onUpdateMixRating={handleUpdateMixRating}
                     onUpdateMixNotes={handleUpdateMixNotes}
                     onEditFlavor={(flavorName) => {
-                      const existing = inventory.find(i => i.name === flavorName) || 
-                                      inventory.find(i => isFlavorMatch(i.name, flavorName));
+                      const normalizedName = normalizeFlavorName(flavorName);
+                      const existing = inventory.find(i => isFlavorMatch(i.name, normalizedName));
                       if (existing) {
                         startEditing(existing);
                       } else {
-                        startEditing({ name: flavorName } as InventoryFlavor, 'stash');
+                        setFlavorToAddChoice(normalizedName);
                       }
                     }}
                   />
@@ -2830,6 +2938,7 @@ function AppContent() {
               onAddShoppingItem={addShoppingItem}
               setHasUnsavedChanges={setHasUnsavedChanges}
               onStartEditingFlavor={startEditing}
+              onAddFlavorChoice={setFlavorToAddChoice}
             />
           </TabsContent>
 
@@ -2848,13 +2957,11 @@ function AppContent() {
               onMarkOrderReceived={handleMarkOrderReceived}
               onDeleteOrder={handleDeleteOrder}
               userSettings={userSettings}
-              onImportInvoice={() => setIsInvoiceImporting(true)}
-              onImportStash={() => setIsStashImporting(true)}
-              onFilterRecipes={(filter) => {
-                setSearchQuery(filter);
-                setActiveTab('recipes');
-              }}
+              onImportInvoice={openInvoiceImport}
+              onImportStash={openStashImport}
+              onFilterRecipes={handleFilterRecipes}
               onStartEditingFlavor={startEditing}
+              onAddFlavorChoice={setFlavorToAddChoice}
               sharedEditingItem={editingItem}
               setSharedEditingItem={setEditingItem}
             />
@@ -2882,8 +2989,6 @@ function AppContent() {
                 setActiveTab('calculator');
               }}
               runtimeKey={runtimeKey}
-              onSelectKey={handleSelectKey}
-              hasAiStudio={hasAiStudio}
               userSettings={userSettings}
               onUpdateSettings={handleUpdateUserSettings}
               isOnline={isOnline}
@@ -2897,7 +3002,6 @@ function AppContent() {
               userSettings={userSettings}
               onUpdateSettings={handleUpdateUserSettings}
               runtimeKey={runtimeKey} 
-              onSelectKey={handleSelectKey}
               user={user}
               onLogin={handleLogin}
               onLogout={handleLogout}
@@ -3003,6 +3107,60 @@ function AppContent() {
           setInitialFocusField(null);
         }} 
       />
+
+      <Dialog open={!!flavorToAddChoice} onOpenChange={(open) => !open && setFlavorToAddChoice(null)}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>Add {flavor(true)}</DialogTitle>
+            <DialogDescription>
+              Add "{flavorToAddChoice}" to your local stash or add it to your shopping list?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3 pt-4">
+            <Button 
+              variant="outline" 
+              className="h-auto py-4 flex flex-col items-center gap-2 border-neutral-200 dark:border-neutral-800 hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 group"
+              onClick={() => {
+                if (flavorToAddChoice) {
+                  const newFlavor = { name: flavorToAddChoice };
+                  addInventoryItem(newFlavor);
+                  startEditing(newFlavor);
+                }
+                setFlavorToAddChoice(null);
+              }}
+            >
+              <Droplets className="w-6 h-6 text-neutral-400 group-hover:text-blue-500" />
+              <div className="flex flex-col items-center">
+                <span className="text-xs font-bold">To Stash</span>
+                <span className="text-[9px] text-neutral-400 group-hover:text-blue-400">Add to local inventory</span>
+              </div>
+            </Button>
+            <Button 
+              variant="outline" 
+              className="h-auto py-4 flex flex-col items-center gap-2 border-neutral-200 dark:border-neutral-800 hover:border-purple-500 hover:bg-purple-50 dark:hover:bg-purple-900/20 group"
+              onClick={() => {
+                if (flavorToAddChoice) {
+                  addShoppingItem({
+                    id: Math.random().toString(36).substr(2, 9),
+                    name: flavorToAddChoice,
+                    addedAt: Date.now()
+                  });
+                }
+                setFlavorToAddChoice(null);
+              }}
+            >
+              <ShoppingCart className="w-6 h-6 text-neutral-400 group-hover:text-purple-500" />
+              <div className="flex flex-col items-center">
+                <span className="text-xs font-bold">To Shopping List</span>
+                <span className="text-[9px] text-neutral-400 group-hover:text-purple-400">Buy it later</span>
+              </div>
+            </Button>
+          </div>
+          <DialogFooter className="sm:justify-start">
+            <Button variant="ghost" className="w-full text-neutral-400" onClick={() => setFlavorToAddChoice(null)}>Cancel</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <AnimatePresence>
         {cookieConsent === null && (
@@ -3661,6 +3819,77 @@ function DuplicateInventoryDialog({
 }
 
 const VERSION_HISTORY = [
+  {
+    version: "1.30.8",
+    date: "May 14, 2026",
+    changes: [
+      "Reliability: Increased Cloud Sync timeout to 60s and added automatic retry logic for large inventories.",
+      "Performance: Debounced local storage persistence and isolated UI re-renders to eliminate lag with 500+ items.",
+      "Stability: Memoized core state handlers to prevent unnecessary component updates."
+    ]
+  },
+  {
+    version: "1.30.7",
+    date: "May 14, 2026",
+    changes: [
+      "Normalization: Added intelligent handling for WS-23 cooling agent variations. 'Ws23', 'WS 23', and 'WS-23 cooling agent' are now automatically unified to 'WS-23'.",
+      "Matching: Improved duplicate detection to ensure all cooling agent variations are correctly identified across stash and recipes."
+    ]
+  },
+  {
+    version: "1.30.6",
+    date: "May 14, 2026",
+    changes: [
+      "Shopping List: Intelligent stock checking now filters out flavors already in pending orders when saving or importing recipes.",
+      "Efficiency: Unified stock checking logic across saving, overwriting, and versioning recipes."
+    ]
+  },
+  {
+    version: "1.30.5",
+    date: "May 13, 2026",
+    changes: [
+      "Performance: Optimized Stash Manager for high-volume inventories (500+ flavors).",
+      "Architecture: Isolated Add Flavor state and implemented O(1) lookups for recipe usage and shopping list status.",
+      "Syncing: Reduced computation overhead during render by pre-calculating normalized mappings."
+    ]
+  },
+  {
+    version: "1.30.3",
+    date: "May 13, 2026",
+    changes: [
+      "Performance: Optimized Flavor Stash UI for large inventories using debounced searching and memoized filtering.",
+      "UX: Decoupled search input from filtering logic to eliminate typing lag.",
+      "Normalization: Refined Title Case logic to preserve manufacturer acronyms (e.g., TFA, CAP) during automatic formatting."
+    ]
+  },
+  {
+    version: "1.30.2",
+    date: "May 13, 2026",
+    changes: [
+      "Normalization: Added intelligent manufacturer mapping and Title Case formatting. Flavors like 'Capella Harvest Berry' are now automatically normalized to 'Harvest Berry (CAP)'.",
+      "Stash Manager: Improved duplicate identification using pre-normalization and added a choice dialog for adding missing flavors to stash or shopping list.",
+      "Workflow: Unified flavor addition logic and improved input handling to automatically clear fields after successful additions.",
+      "Syncing: Enhanced data consistency between orders and stash through automatic name normalization."
+    ]
+  },
+  {
+    version: "1.30.1",
+    date: "May 13, 2026",
+    changes: [
+      "AI Setup: Removed 'Connect via AI Studio' option to favor standard manual API key entry for public users.",
+      "Security: Simplified API key management and removed legacy preview-environment integration logic.",
+      "Cleanup: Removed unused states and props related to AI Studio platform features."
+    ]
+  },
+  {
+    version: "1.30.0",
+    date: "May 13, 2026",
+    changes: [
+      "AI Service: Fixed a bug where the AI Lab remained accessible after logout due to stale cached API keys.",
+      "Security: Improved session isolation by clearing all AI-related configuration and runtime keys on logout.",
+      "Auth: Enhanced state reset logic to ensure a clean prompt for Gemini API keys when no user is authenticated."
+    ]
+  },
   {
     version: "1.29.8",
     date: "May 12, 2026",
@@ -4473,7 +4702,8 @@ function RecipeEditor({
   onAddInventoryItem,
   onAddShoppingItem,
   setHasUnsavedChanges,
-  onStartEditingFlavor
+  onStartEditingFlavor,
+  onAddFlavorChoice
 }: { 
   recipe: Recipe | null, 
   recipes: Recipe[], 
@@ -4481,13 +4711,14 @@ function RecipeEditor({
   onSave: (r: Recipe, m?: Mix, isExplicitNewVersion?: boolean) => void, 
   onCancel: () => void, 
   costs: IngredientCost, 
-  userSettings: UserSettings,
-  shoppingList: ShoppingItem[],
-  orders?: Order[],
-  onAddInventoryItem: (item: InventoryFlavor) => void,
-  onAddShoppingItem: (item: ShoppingItem) => void,
-  setHasUnsavedChanges: (has: boolean) => void,
-  onStartEditingFlavor: (item: InventoryFlavor, target?: 'stash' | 'shopping', focusField?: string) => void
+  userSettings: UserSettings, 
+  shoppingList: ShoppingItem[], 
+  orders?: Order[], 
+  onAddInventoryItem: (item: InventoryFlavor) => void, 
+  onAddShoppingItem: (item: ShoppingItem) => void, 
+  setHasUnsavedChanges: (has: boolean) => void, 
+  onStartEditingFlavor: (item: InventoryFlavor, target?: 'stash' | 'shopping', focusField?: string) => void,
+  onAddFlavorChoice: (name: string) => void
 }) {
   const [flavourIntensity, setFlavourIntensity] = useState(100);
   const [saveAsNewVersion, setSaveAsNewVersion] = useState(false);
@@ -5420,7 +5651,7 @@ function RecipeEditor({
                             if (stashFlavor) {
                               onStartEditingFlavor(stashFlavor);
                             } else {
-                              onStartEditingFlavor({ name: f.name }, 'stash');
+                              onAddFlavorChoice(f.name);
                             }
                           }}
                           onKeyDown={(e) => {
@@ -5430,7 +5661,7 @@ function RecipeEditor({
                               if (stashFlavor) {
                                 onStartEditingFlavor(stashFlavor);
                               } else {
-                                onStartEditingFlavor({ name: f.name }, 'stash');
+                                onAddFlavorChoice(f.name);
                               }
                             }
                           }}
@@ -5510,7 +5741,7 @@ function RecipeEditor({
                             if (stashFlavor) {
                               onStartEditingFlavor(stashFlavor, undefined, 'cost');
                             } else {
-                              onStartEditingFlavor({ name: f.name }, 'stash', 'cost');
+                              onAddFlavorChoice(f.name);
                             }
                           }}
                           onKeyDown={(e) => {
@@ -5520,7 +5751,7 @@ function RecipeEditor({
                               if (stashFlavor) {
                                 onStartEditingFlavor(stashFlavor, undefined, 'cost');
                               } else {
-                                onStartEditingFlavor({ name: f.name }, 'stash', 'cost');
+                                onAddFlavorChoice(f.name);
                               }
                             }
                           }}
@@ -6083,6 +6314,277 @@ function OrderSummary({ order, onMarkReceived, onDelete }: OrderSummaryProps) {
   );
 }
 
+const InventoryRow = React.memo(({ 
+  item, 
+  idx, 
+  isOnShoppingList, 
+  isExpanded, 
+  usageCount, 
+  userSettings, 
+  onStartEditingFlavor, 
+  onSetItemToShop, 
+  onSetItemToDelete, 
+  onToggleNotes, 
+  onFilterRecipes 
+}: { 
+  item: InventoryFlavor, 
+  idx: number, 
+  isOnShoppingList: boolean, 
+  isExpanded: boolean, 
+  usageCount: number, 
+  userSettings: UserSettings, 
+  onStartEditingFlavor: (item: InventoryFlavor) => void,
+  onSetItemToShop: (item: InventoryFlavor) => void,
+  onSetItemToDelete: (item: InventoryFlavor) => void,
+  onToggleNotes: (name: string) => void,
+  onFilterRecipes: (name: string) => void
+}) => {
+  const itemKey = item.id || `${item.name}-${idx}`;
+  return (
+    <div key={itemKey} className="flex flex-col gap-1 w-full">
+      <div 
+        className="pl-3 pr-2 py-2 gap-4 group bg-white dark:bg-neutral-900 border border-green-100 dark:border-green-800 rounded-xl shadow-sm hover:border-green-300 dark:hover:border-green-700 transition-colors h-auto w-full whitespace-normal items-center cursor-pointer hover:ring-2 hover:ring-offset-1 hover:ring-green-50 dark:hover:ring-green-900 flex justify-between"
+        onClick={() => onStartEditingFlavor(item)}
+      >
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-400 font-mono shrink-0">
+            {getManufacturer(item.name)}
+          </span>
+          <div className="flex flex-col flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-neutral-700 dark:text-neutral-200 leading-tight truncate">
+                {formatFlavorName(item.name)}
+              </span>
+              {(item.safetyWarnings || getSafetyWarnings(item.name)).length > 0 && (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger>
+                      <div className="shrink-0 p-0.5 flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
+                        <AlertTriangle className="w-3.5 h-3.5 text-red-500 animate-pulse cursor-help" />
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-[250px] bg-red-950 text-red-100 border-red-900">
+                      <p className="text-xs font-bold mb-1">Safety Concern:</p>
+                      <p className="text-[10px] leading-relaxed">{(item.safetyWarnings || getSafetyWarnings(item.name)).join(" ")}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
+              {item.notes && (
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleNotes(item.name);
+                  }}
+                  className={`hover:text-blue-500 transition-colors shrink-0 cursor-pointer ${isExpanded ? 'text-blue-500' : 'text-neutral-400'}`}
+                  title="View Notes"
+                >
+                  <StickyNote className="w-3 h-3" />
+                </div>
+              )}
+              {item.volumeMl !== undefined && (
+                <div className="flex items-center gap-1">
+                  <Badge 
+                    variant="secondary" 
+                    className={`text-[9px] h-4 px-1.5 font-bold ${
+                      item.volumeMl <= (userSettings.lowStockThreshold || 0)
+                        ? 'bg-red-50 dark:bg-red-950/30 text-red-600 dark:text-red-400 border-red-100 dark:border-red-900/50'
+                        : 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 border-none'
+                    }`}
+                  >
+                    {item.volumeMl.toFixed(2)}ml
+                    {item.volumeMl <= (userSettings.lowStockThreshold || 0) && (
+                      <AlertTriangle className="w-2.5 h-2.5 ml-1" />
+                    )}
+                  </Badge>
+                  {(!item.costPerMl || item.costPerMl <= 0) && (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <Badge variant="outline" className="text-[9px] h-4 px-1.5 bg-amber-50 dark:bg-amber-950/30 text-amber-600 dark:text-amber-400 border-amber-100 dark:border-amber-900/50 cursor-help">
+                            <DollarSign className="w-2.5 h-2.5" />
+                          </Badge>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="text-xs">Missing cost information (Imported from ATF/ELR)</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
+                </div>
+              )}
+              {usageCount > 0 && (
+                <div 
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onFilterRecipes(item.name);
+                  }}
+                  className="text-[10px] font-bold text-blue-500 hover:text-blue-600 hover:underline flex items-center gap-0.5 shrink-0 cursor-pointer"
+                  title={`Used in ${usageCount} ${usageCount === 1 ? 'recipe' : 'recipes'}`}
+                >
+                  <Book className="w-2.5 h-2.5" /> {usageCount}
+                </div>
+              )}
+            </div>
+            {(item.costPerMl ?? 0) > 0 && (
+              <span className="text-[9px] text-neutral-400 dark:text-neutral-500 font-mono mt-0.5">
+                ${item.costPerMl?.toFixed(2)}/ml
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0" onClick={(e) => e.stopPropagation()}>
+          {!isOnShoppingList && (
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              className="h-6 w-6 rounded-full hover:bg-blue-50 text-blue-600 transition-colors"
+              onClick={() => onSetItemToShop(item)}
+              title="Add to Shopping List (Running Low)"
+            >
+              <ShoppingCart className="w-3.5 h-3.5" />
+            </Button>
+          )}
+          <Button 
+            variant="ghost" 
+            size="icon" 
+            className="h-6 w-6 rounded-full hover:bg-red-50 hover:text-red-600 text-neutral-400 transition-colors shrink-0"
+            onClick={() => onSetItemToDelete(item)}
+          >
+            <X className="w-3.5 h-3.5" />
+          </Button>
+        </div>
+      </div>
+      <AnimatePresence>
+        {item.notes && isExpanded && (
+          <motion.div
+            key={`${item.name}-notes`}
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="px-3 py-2 bg-blue-50/50 dark:bg-blue-900/10 border border-blue-100/50 dark:border-blue-900/30 rounded-lg mx-1 mb-1">
+              <p className="text-[11px] text-neutral-600 dark:text-neutral-400 italic whitespace-normal leading-relaxed">
+                {item.notes}
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+});
+
+const AddFlavorInput = React.memo(({ onAdd }: { onAdd: (name: string) => void }) => {
+  const [newItem, setNewItem] = useState('');
+  
+  const handleAdd = () => {
+    if (newItem.trim()) {
+      onAdd(newItem.trim());
+      setNewItem('');
+    }
+  };
+
+  return (
+    <div className="flex gap-2">
+      <div className="relative flex-1">
+        <PlusCircle className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
+        <Input 
+          placeholder={`Add ${flavor()} (e.g. Strawberry Ripe (TFA))`} 
+          className="pl-9 h-10"
+          value={newItem}
+          onChange={(e) => setNewItem(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+        />
+      </div>
+      <Button onClick={handleAdd} className="h-10 bg-neutral-900 dark:bg-neutral-200 hover:bg-neutral-800 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold shrink-0">
+        Add
+      </Button>
+    </div>
+  );
+});
+
+const InventoryList = React.memo(({ 
+  items, 
+  shoppingListNamesSet, 
+  expandedNotes, 
+  flavorUsageMap, 
+  userSettings, 
+  onStartEditingFlavor, 
+  handleSetItemToShop, 
+  handleSetItemToDelete, 
+  toggleNotes, 
+  handleFilterRecipes 
+}: {
+  items: (InventoryFlavor & { normalizedName: string })[],
+  shoppingListNamesSet: Set<string>,
+  expandedNotes: Record<string, boolean>,
+  flavorUsageMap: Map<string, number>,
+  userSettings: UserSettings,
+  onStartEditingFlavor: (item: InventoryFlavor, target?: 'stash' | 'shopping', focusField?: string) => void,
+  handleSetItemToShop: (item: InventoryFlavor) => void,
+  handleSetItemToDelete: (item: InventoryFlavor) => void,
+  toggleNotes: (name: string) => void,
+  handleFilterRecipes: (filter: string) => void
+}) => {
+  return (
+    <>
+      {items.map((item, idx) => (
+        <InventoryRow
+          key={item.id || `${item.name}-${idx}`}
+          item={item}
+          idx={idx}
+          isOnShoppingList={shoppingListNamesSet.has(item.normalizedName)}
+          isExpanded={!!expandedNotes[item.name]}
+          usageCount={flavorUsageMap.get(item.normalizedName) || 0}
+          userSettings={userSettings}
+          onStartEditingFlavor={onStartEditingFlavor}
+          onSetItemToShop={handleSetItemToShop}
+          onSetItemToDelete={handleSetItemToDelete}
+          onToggleNotes={toggleNotes}
+          onFilterRecipes={handleFilterRecipes}
+        />
+      ))}
+    </>
+  );
+});
+
+const SearchInput = React.memo(({ value, onChange, placeholder }: { value: string, onChange: (val: string) => void, placeholder: string }) => {
+  const [localValue, setLocalValue] = useState(value);
+  
+  useEffect(() => {
+    setLocalValue(value);
+  }, [value]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setLocalValue(val);
+    onChange(val);
+  };
+
+  return (
+    <div className="relative h-10">
+      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
+      <Input 
+        placeholder={placeholder}
+        className="pl-9 h-10 border-blue-100 dark:border-blue-900/40 focus:ring-blue-100 dark:focus:ring-blue-900/20"
+        value={localValue}
+        onChange={handleChange}
+      />
+      {localValue && (
+        <button 
+          onClick={() => { setLocalValue(''); onChange(''); }}
+          className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full"
+        >
+          <X className="w-3 h-3 text-neutral-400" />
+        </button>
+      )}
+    </div>
+  );
+});
+
 function InventoryManager({ 
   inventory, 
   recipes, 
@@ -6101,6 +6603,7 @@ function InventoryManager({
   onImportStash,
   onFilterRecipes,
   onStartEditingFlavor,
+  onAddFlavorChoice,
   sharedEditingItem,
   setSharedEditingItem
 }: { 
@@ -6121,22 +6624,48 @@ function InventoryManager({
   onImportStash: () => void,
   onFilterRecipes: (filter: string) => void,
   onStartEditingFlavor: (item: InventoryFlavor, target?: 'stash' | 'shopping', focusField?: string) => void,
+  onAddFlavorChoice: (name: string) => void,
   sharedEditingItem: InventoryFlavor | null,
   setSharedEditingItem: (item: InventoryFlavor | null) => void
 }) {
-  const [newItem, setNewItem] = useState('');
   const [inventorySearchQuery, setInventorySearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'manufacturer'>('name');
+
+  // Debounce search query to avoid lag in large inventories
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchQuery(inventorySearchQuery);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [inventorySearchQuery]);
+
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
   
   const [itemToDelete, setItemToDelete] = useState<InventoryFlavor | null>(null);
   const [itemToShop, setItemToShop] = useState<InventoryFlavor | null>(null);
-  const [itemToAdd, setItemToAdd] = useState<string | null>(null);
   const [missingToShop, setMissingToShop] = useState<string | null>(null);
   const [shopToStash, setShopToStash] = useState<ShoppingItem | null>(null);
   const [volumeToAdd, setVolumeToAdd] = useState<string>('30');
   const [shoppingItemToRemove, setShoppingItemToRemove] = useState<ShoppingItem | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  // Pre-calculate normalized names for O(1) shopping list check
+  const shoppingListNamesSet = useMemo(() => {
+    return new Set(shoppingList.map(s => normalizeFlavorName(s.name)));
+  }, [shoppingList]);
+
+  // Pre-calculate recipe usage counts for O(1) lookup
+  const flavorUsageMap = useMemo(() => {
+    const usageMap = new Map<string, number>();
+    recipes.forEach(recipe => {
+      recipe.flavors.forEach(f => {
+        const normalized = normalizeFlavorName(f.name);
+        usageMap.set(normalized, (usageMap.get(normalized) || 0) + 1);
+      });
+    });
+    return usageMap;
+  }, [recipes]);
 
   const exportShoppingList = () => {
     if (shoppingList.length === 0) return;
@@ -6181,8 +6710,8 @@ function InventoryManager({
 
   const filteredInventory = useMemo(() => {
     let list = inventory;
-    if (inventorySearchQuery) {
-      const q = inventorySearchQuery.toLowerCase();
+    if (debouncedSearchQuery) {
+      const q = debouncedSearchQuery.toLowerCase();
       list = list.filter(i => 
         i.name.toLowerCase().includes(q) || 
         getManufacturer(i.name).toLowerCase().includes(q) ||
@@ -6190,71 +6719,75 @@ function InventoryManager({
       );
     }
     return sortFlavors(list);
-  }, [inventory, sortBy, inventorySearchQuery]);
+  }, [inventory, sortBy, debouncedSearchQuery]);
 
   const filteredShoppingList = useMemo(() => {
     let list = shoppingList;
-    if (inventorySearchQuery) {
-      const q = inventorySearchQuery.toLowerCase();
+    if (debouncedSearchQuery) {
+      const q = debouncedSearchQuery.toLowerCase();
       list = list.filter(i => 
         i.name.toLowerCase().includes(q) || 
         getManufacturer(i.name).toLowerCase().includes(q)
       );
     }
-    return sortFlavors(list);
-  }, [shoppingList, sortBy, inventorySearchQuery]);
+    return list;
+  }, [shoppingList, debouncedSearchQuery]);
 
   const filteredMissing = useMemo(() => {
     let list = missingFlavors.map(name => ({ name }));
-    if (inventorySearchQuery) {
-      const q = inventorySearchQuery.toLowerCase();
+    if (debouncedSearchQuery) {
+      const q = debouncedSearchQuery.toLowerCase();
       list = list.filter(i => 
         i.name.toLowerCase().includes(q) || 
         getManufacturer(i.name).toLowerCase().includes(q)
       );
     }
     return sortFlavors(list);
-  }, [missingFlavors, sortBy, inventorySearchQuery]);
+  }, [missingFlavors, sortBy, debouncedSearchQuery]);
 
-  const flavorUsage = useMemo(() => {
-    const usageMap: Record<string, number> = {};
-    recipes.forEach(recipe => {
-      recipe.flavors.forEach(f => {
-        const name = f.name;
-        // Find existing match to ensure consistent counting across slightly different names
-        const matchKey = Object.keys(usageMap).find(k => isFlavorMatch(k, name));
-        if (matchKey) {
-          usageMap[matchKey]++;
-        } else {
-          usageMap[name] = 1;
-        }
-      });
-    });
-    return usageMap;
-  }, [recipes]);
+  // Pre-calculate normalized names for inventory items to avoid repeating expensive string operations
+  const normalizedInventory = useMemo(() => {
+    return filteredInventory.map(item => ({
+      ...item,
+      normalizedName: normalizeFlavorName(item.name)
+    }));
+  }, [filteredInventory]);
 
-  const getUsageCount = (name: string) => {
-    const matchKey = Object.keys(flavorUsage).find(k => isFlavorMatch(k, name));
-    return matchKey ? flavorUsage[matchKey] : 0;
-  };
-
-  const addItem = (item?: string) => {
-    const flavorNameToAdd = item || newItem;
-    if (flavorNameToAdd) {
-      const existing = inventory.find(i => isFlavorMatch(i.name, flavorNameToAdd));
+  const addItem = useCallback((rawName: string) => {
+    if (rawName) {
+      const normalizedName = normalizeFlavorName(rawName);
+      const existing = inventory.find(i => isFlavorMatch(i.name, normalizedName));
       if (existing) {
-        // Flavor already exists, open it for editing instead of showing the "Add" dialog
         onStartEditingFlavor(existing, 'stash', 'volumeMl');
-        setNewItem(''); // Clear input
       } else {
-        setItemToAdd(flavorNameToAdd);
+        onAddFlavorChoice(normalizedName);
       }
     }
-  };
+  }, [inventory, onStartEditingFlavor, onAddFlavorChoice]);
 
-  const removeItem = (item: InventoryFlavor) => {
+  const removeItem = useCallback((item: InventoryFlavor) => {
     onRemoveInventoryItem(item.name, true);
-  };
+  }, [onRemoveInventoryItem]);
+
+  const toggleNotes = useCallback((name: string) => {
+    setExpandedNotes(prev => ({ ...prev, [name]: !prev[name] }));
+  }, []);
+
+  const handleSetItemToShop = useCallback((item: InventoryFlavor) => {
+    setItemToShop(item);
+  }, []);
+
+  const handleSetItemToDelete = useCallback((item: InventoryFlavor) => {
+    setItemToDelete(item);
+  }, []);
+
+  const handleFilterRecipes = useCallback((name: string) => {
+    onFilterRecipes(name);
+  }, [onFilterRecipes]);
+
+  const handleStartEditing = useCallback((item: InventoryFlavor) => {
+    onStartEditingFlavor(item);
+  }, [onStartEditingFlavor]);
 
   return (
     <Card>
@@ -6302,38 +6835,12 @@ function InventoryManager({
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <PlusCircle className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
-              <Input 
-                placeholder={`Add ${flavor()} (e.g. Strawberry Ripe (TFA))`} 
-                className="pl-9 h-10"
-                value={newItem}
-                onChange={(e) => setNewItem(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && addItem()}
-              />
-            </div>
-            <Button onClick={() => addItem()} className="h-10 bg-neutral-900 dark:bg-neutral-200 hover:bg-neutral-800 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold shrink-0">
-              Add
-            </Button>
-          </div>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
-            <Input 
-              placeholder={`Search your stash...`} 
-              className="pl-9 h-10 border-blue-100 dark:border-blue-900/40 focus:ring-blue-100 dark:focus:ring-blue-900/20"
-              value={inventorySearchQuery}
-              onChange={(e) => setInventorySearchQuery(e.target.value)}
-            />
-            {inventorySearchQuery && (
-              <button 
-                onClick={() => setInventorySearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full"
-              >
-                <X className="w-3 h-3 text-neutral-400" />
-              </button>
-            )}
-          </div>
+          <AddFlavorInput onAdd={addItem} />
+          <SearchInput 
+            value={inventorySearchQuery} 
+            onChange={setInventorySearchQuery} 
+            placeholder="Search your stash..." 
+          />
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -6349,150 +6856,25 @@ function InventoryManager({
             </div>
             <ScrollArea className="h-[600px] rounded-xl border border-green-100 dark:border-green-900 bg-green-50/20 dark:bg-green-950/20 p-4">
                 <div className="flex flex-col gap-2">
-                  {filteredInventory.length === 0 && inventorySearchQuery ? (
+                  {filteredInventory.length === 0 && (inventorySearchQuery || debouncedSearchQuery) ? (
                     <div className="flex flex-col items-center justify-center py-12 text-center">
                       <Search className="w-8 h-8 text-neutral-300 mb-2" />
                       <p className="text-sm font-medium text-neutral-500">No matching flavours found</p>
                     </div>
-                  ) : filteredInventory.map((item, idx) => {
-                    const isOnShoppingList = shoppingList.some(s => isFlavorMatch(s.name, item.name));
-                    const itemKey = item.id || `${item.name}-${idx}`;
-                    return (
-                      <div key={itemKey} className="flex flex-col gap-1 w-full">
-                        <div 
-                          className="pl-3 pr-2 py-2 gap-4 group bg-white dark:bg-neutral-900 border border-green-100 dark:border-green-800 rounded-xl shadow-sm hover:border-green-300 dark:hover:border-green-700 transition-colors h-auto w-full whitespace-normal items-center cursor-pointer hover:ring-2 hover:ring-offset-1 hover:ring-green-50 dark:hover:ring-green-900 flex justify-between"
-                          onClick={() => onStartEditingFlavor(item)}
-                        >
-                          <div className="flex items-center gap-3 flex-1 min-w-0">
-                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-400 font-mono shrink-0">
-                              {getManufacturer(item.name)}
-                            </span>
-                            <div className="flex flex-col flex-1 min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-200 leading-tight truncate">
-                                  {formatFlavorName(item.name)}
-                                </span>
-                                {(item.safetyWarnings || getSafetyWarnings(item.name)).length > 0 && (
-                                  <TooltipProvider>
-                                    <Tooltip>
-                                      <TooltipTrigger>
-                                        <div className="shrink-0 p-0.5 flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
-                                          <AlertTriangle className="w-3.5 h-3.5 text-red-500 animate-pulse cursor-help" />
-                                        </div>
-                                      </TooltipTrigger>
-                                      <TooltipContent className="max-w-[250px] bg-red-950 text-red-100 border-red-900">
-                                        <p className="text-xs font-bold mb-1">Safety Concern:</p>
-                                        <p className="text-[10px] leading-relaxed">{(item.safetyWarnings || getSafetyWarnings(item.name)).join(" ")}</p>
-                                      </TooltipContent>
-                                    </Tooltip>
-                                  </TooltipProvider>
-                                )}
-                                {item.notes && (
-                                  <div
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setExpandedNotes(prev => ({ ...prev, [item.name]: !prev[item.name] }));
-                                    }}
-                                    className={`hover:text-blue-500 transition-colors shrink-0 cursor-pointer ${expandedNotes[item.name] ? 'text-blue-500' : 'text-neutral-400'}`}
-                                    title="View Notes"
-                                  >
-                                    <StickyNote className="w-3 h-3" />
-                                  </div>
-                                )}
-                                {item.volumeMl !== undefined && (
-                                  <div className="flex items-center gap-1">
-                                    <Badge 
-                                      variant="secondary" 
-                                      className={`text-[9px] h-4 px-1.5 font-bold ${
-                                        item.volumeMl <= (userSettings.lowStockThreshold || 0)
-                                          ? 'bg-red-50 dark:bg-red-950/30 text-red-600 dark:text-red-400 border-red-100 dark:border-red-900/50'
-                                          : 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 border-none'
-                                      }`}
-                                    >
-                                      {item.volumeMl.toFixed(2)}ml
-                                      {item.volumeMl <= (userSettings.lowStockThreshold || 0) && (
-                                        <AlertTriangle className="w-2.5 h-2.5 ml-1" />
-                                      )}
-                                    </Badge>
-                                    {(!item.costPerMl || item.costPerMl <= 0) && (
-                                      <TooltipProvider>
-                                        <Tooltip>
-                                          <TooltipTrigger>
-                                            <Badge variant="outline" className="text-[9px] h-4 px-1.5 bg-amber-50 dark:bg-amber-950/30 text-amber-600 dark:text-amber-400 border-amber-100 dark:border-amber-900/50 cursor-help">
-                                              <DollarSign className="w-2.5 h-2.5" />
-                                            </Badge>
-                                          </TooltipTrigger>
-                                          <TooltipContent>
-                                            <p className="text-xs">Missing cost information (Imported from ATF/ELR)</p>
-                                          </TooltipContent>
-                                        </Tooltip>
-                                      </TooltipProvider>
-                                    )}
-                                  </div>
-                                )}
-                                {getUsageCount(item.name) > 0 && (
-                                  <div 
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      onFilterRecipes(item.name);
-                                    }}
-                                    className="text-[10px] font-bold text-blue-500 hover:text-blue-600 hover:underline flex items-center gap-0.5 shrink-0 cursor-pointer"
-                                    title={`Used in ${getUsageCount(item.name)} ${getUsageCount(item.name) === 1 ? 'recipe' : 'recipes'}`}
-                                  >
-                                    <Book className="w-2.5 h-2.5" /> {getUsageCount(item.name)}
-                                  </div>
-                                )}
-                              </div>
-                              {(item.costPerMl ?? 0) > 0 && (
-                                <span className="text-[9px] text-neutral-400 dark:text-neutral-500 font-mono mt-0.5">
-                                  ${item.costPerMl?.toFixed(2)}/ml
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0" onClick={(e) => e.stopPropagation()}>
-                            {!isOnShoppingList && (
-                              <Button 
-                                variant="ghost" 
-                                size="icon" 
-                                className="h-6 w-6 rounded-full hover:bg-blue-50 text-blue-600 transition-colors"
-                                onClick={() => setItemToShop(item)}
-                                title="Add to Shopping List (Running Low)"
-                              >
-                                <ShoppingCart className="w-3.5 h-3.5" />
-                              </Button>
-                            )}
-                            <Button 
-                              variant="ghost" 
-                              size="icon" 
-                              className="h-6 w-6 rounded-full hover:bg-red-50 hover:text-red-600 text-neutral-400 transition-colors shrink-0"
-                              onClick={() => setItemToDelete(item)}
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                        <AnimatePresence>
-                          {item.notes && expandedNotes[item.name] && (
-                            <motion.div
-                              key={`${item.name}-notes`}
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: 'auto', opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              transition={{ duration: 0.2 }}
-                              className="overflow-hidden"
-                            >
-                              <div className="px-3 py-2 bg-blue-50/50 dark:bg-blue-900/10 border border-blue-100/50 dark:border-blue-900/30 rounded-lg mx-1 mb-1">
-                                <p className="text-[11px] text-neutral-600 dark:text-neutral-400 italic whitespace-normal leading-relaxed">
-                                  {item.notes}
-                                </p>
-                              </div>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-                      </div>
-                    );
-                  })}
+                  ) : (
+                    <InventoryList 
+                      items={normalizedInventory}
+                      shoppingListNamesSet={shoppingListNamesSet}
+                      expandedNotes={expandedNotes}
+                      flavorUsageMap={flavorUsageMap}
+                      userSettings={userSettings}
+                      onStartEditingFlavor={handleStartEditing}
+                      handleSetItemToShop={handleSetItemToShop}
+                      handleSetItemToDelete={handleSetItemToDelete}
+                      toggleNotes={toggleNotes}
+                      handleFilterRecipes={handleFilterRecipes}
+                    />
+                  )}
                   {inventory.length === 0 && (
                     <div className="flex flex-col items-center justify-center w-full py-12 text-neutral-400">
                       <Droplets className="w-8 h-8 mb-2 opacity-20" />
@@ -6558,16 +6940,16 @@ function InventoryManager({
                             <p className="text-xs font-semibold text-neutral-700 dark:text-neutral-200 leading-tight truncate">
                               {formatFlavorName(item.name)}
                             </p>
-                            {getUsageCount(item.name) > 0 && (
+                            {(flavorUsageMap.get(normalizeFlavorName(item.name)) || 0) > 0 && (
                               <button 
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   onFilterRecipes(item.name);
                                 }}
                                 className="text-[10px] font-bold text-blue-500 dark:text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 hover:underline flex items-center gap-0.5 shrink-0"
-                                title={`Used in ${getUsageCount(item.name)} ${getUsageCount(item.name) === 1 ? 'recipe' : 'recipes'}`}
+                                title={`Used in ${flavorUsageMap.get(normalizeFlavorName(item.name))} ${flavorUsageMap.get(normalizeFlavorName(item.name)) === 1 ? 'recipe' : 'recipes'}`}
                               >
-                                <Book className="w-2.5 h-2.5" /> {getUsageCount(item.name)}
+                                <Book className="w-2.5 h-2.5" /> {flavorUsageMap.get(normalizeFlavorName(item.name))}
                               </button>
                             )}
                           </div>
@@ -6617,7 +6999,9 @@ function InventoryManager({
               <ScrollArea className="h-[600px] rounded-xl border border-amber-100 dark:border-amber-900 bg-amber-50/20 dark:bg-amber-950/20 p-3">
                     <div className="space-y-2">
                   {filteredMissing.map((item, idx) => {
-                    const isOnShoppingList = shoppingList.some(s => isFlavorMatch(s.name, item.name));
+                    const normalized = normalizeFlavorName(item.name);
+                    const isOnShoppingList = shoppingListNamesSet.has(normalized);
+                    const usageCount = flavorUsageMap.get(normalized) || 0;
                     const itemKey = `missing-${item.name}-${idx}`;
                     return (
                       <div key={itemKey} className="flex items-center justify-between bg-white dark:bg-neutral-900 p-3 rounded-xl border border-amber-100 dark:border-amber-800 shadow-sm group gap-4">
@@ -6630,16 +7014,16 @@ function InventoryManager({
                             <p className="text-xs font-semibold text-neutral-700 dark:text-neutral-200 leading-tight truncate">
                               {formatFlavorName(item.name)}
                             </p>
-                            {getUsageCount(item.name) > 0 && (
+                            {usageCount > 0 && (
                               <button 
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   onFilterRecipes(item.name);
                                 }}
                                 className="text-[10px] font-bold text-blue-500 dark:text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 hover:underline flex items-center gap-0.5 shrink-0"
-                                title={`Used in ${getUsageCount(item.name)} ${getUsageCount(item.name) === 1 ? 'recipe' : 'recipes'}`}
+                                title={`Used in ${usageCount} ${usageCount === 1 ? 'recipe' : 'recipes'}`}
                               >
-                                <Book className="w-2.5 h-2.5" /> {getUsageCount(item.name)}
+                                <Book className="w-2.5 h-2.5" /> {usageCount}
                               </button>
                             )}
                           </div>
@@ -6768,30 +7152,6 @@ function InventoryManager({
                 }
                 setItemToShop(null);
               }}>Add to List</Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-
-        <Dialog open={!!itemToAdd} onOpenChange={(open) => !open && setItemToAdd(null)}>
-          <DialogContent className="sm:max-w-[425px]">
-            <DialogHeader>
-              <DialogTitle>Add to Stash</DialogTitle>
-              <DialogDescription>
-                Add "{itemToAdd}" to your flavor stash?
-              </DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setItemToAdd(null)}>Cancel</Button>
-              <Button onClick={() => {
-                if (itemToAdd) {
-                  const newFlavor = { name: itemToAdd };
-                  onAddInventoryItem(newFlavor);
-                  if (itemToAdd === newItem) setNewItem('');
-                  // Open the edit dialog immediately to allow adding volume, price, etc.
-                  onStartEditingFlavor(newFlavor);
-                }
-                setItemToAdd(null);
-              }}>Add to Stash</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -7003,7 +7363,11 @@ function FlavorEditDialog({
     if (!item) return;
     const trimmedName = editName.trim();
     const trimmedMan = editManufacturer.trim().toUpperCase();
-    const newFlavorName = trimmedMan ? `${trimmedName} (${trimmedMan})` : trimmedName;
+    
+    // Construct name and then normalize it to catch cases where user puts man in name field
+    const rawName = (trimmedMan && trimmedMan !== 'OTHER') ? `${trimmedName} (${trimmedMan})` : trimmedName;
+    const newFlavorName = normalizeFlavorName(rawName);
+    
     const costValue = parseFloat(editCost);
     const cost = !isNaN(costValue) ? costValue : undefined;
     const volumeValue = parseFloat(editVolume);
@@ -7199,8 +7563,6 @@ function AiLab({
   isLoading, 
   onUseRecipe,
   runtimeKey,
-  onSelectKey,
-  hasAiStudio,
   userSettings,
   onUpdateSettings,
   isOnline
@@ -7211,8 +7573,6 @@ function AiLab({
   isLoading: boolean, 
   onUseRecipe: (r: any) => void,
   runtimeKey: string | null,
-  onSelectKey: () => void,
-  hasAiStudio: boolean,
   userSettings: UserSettings,
   onUpdateSettings: (s: UserSettings) => void,
   isOnline: boolean
@@ -7264,20 +7624,7 @@ function AiLab({
                 Gemini is Google's AI that powers the recipe generation. You can get a free API key from the Google AI Studio.
               </p>
               
-              <div className="flex flex-col gap-3">
-                <Button 
-                  className="w-full bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white font-bold"
-                  onClick={onSelectKey}
-                >
-                  <Sparkles className="w-4 h-4 mr-2" />
-                  Connect via AI Studio
-                </Button>
-
-                <div className="relative py-2">
-                  <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-neutral-200 dark:border-neutral-800"></span></div>
-                  <div className="relative flex justify-center text-[10px] uppercase"><span className="bg-neutral-50 dark:bg-neutral-900 px-2 text-neutral-400 font-bold">Or Manual Setup</span></div>
-                </div>
-
+              <div className="space-y-4">
                 <div className="space-y-2">
                   <Label className="text-[10px] uppercase tracking-wider text-neutral-500 dark:text-neutral-400">Paste Gemini API Key</Label>
                   <div className="flex gap-2">
@@ -7421,7 +7768,6 @@ function SettingsPanel({
   userSettings,
   onUpdateSettings,
   runtimeKey, 
-  onSelectKey,
   user,
   onLogin,
   onLogout,
@@ -7439,7 +7785,6 @@ function SettingsPanel({
   userSettings: UserSettings,
   onUpdateSettings: (s: UserSettings) => void,
   runtimeKey: string | null, 
-  onSelectKey: () => void,
   user: User | null,
   onLogin: () => void,
   onLogout: () => void,

@@ -2,6 +2,10 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 let cachedApiKey: string | null = null;
 
+export function resetGeminiService() {
+  cachedApiKey = null;
+}
+
 async function getApiKey(userApiKey?: string) {
   if (userApiKey && userApiKey.length >= 10) return userApiKey;
   if (cachedApiKey) return cachedApiKey;
