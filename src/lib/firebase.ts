@@ -14,12 +14,14 @@ if (typeof window !== 'undefined') {
   const isInstallationError = (msg: string) => 
     msg.includes('installations/request-failed') || 
     (msg.includes('403') && msg.includes('installations')) ||
-    (msg.includes('PERMISSION_DENIED') && msg.includes('installations'));
+    (msg.includes('PERMISSION_DENIED') && msg.includes('installations')) ||
+    msg.includes('auth/network-request-failed') ||
+    msg.includes('network-request-failed');
 
   window.addEventListener('unhandledrejection', (event) => {
     const error = event.reason;
     const msg = error?.message || String(error);
-    if (isInstallationError(msg) || msg.includes('Could not reach Cloud Firestore backend')) {
+    if (isInstallationError(msg) || msg.includes('Could not reach Cloud Firestore backend') || msg.includes('auth/network-request-failed')) {
       event.preventDefault();
       // Silently swallow
     }

@@ -82,6 +82,7 @@ export interface InventoryFlavor {
   notes?: string;
   uid?: string;
   safetyWarnings?: string[];
+  updatedAt?: number;
 }
 
 export interface ShoppingItem {

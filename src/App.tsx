@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { useState, useEffect, useMemo, ReactNode, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, ReactNode, useCallback, useRef, useTransition } from 'react';
 import { Toaster, toast } from 'sonner';
 import { 
   Plus, 
@@ -7,10 +7,12 @@ import {
   FlaskConical, 
   Book, 
   Sparkles, 
+  Loader2,
   Settings, 
   Trash2, 
   Edit2, 
   ChevronRight,
+  ChevronLeft,
   ShieldCheck,
   Droplets,
   Beaker,
@@ -39,6 +41,7 @@ import {
   CloudOff,
   AlertCircle,
   AlertTriangle,
+  Truck,
   Moon,
   Sun,
   Heart,
@@ -58,17 +61,19 @@ import * as pdfjsLib from 'pdfjs-dist';
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Slider } from '@/components/ui/slider';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -86,7 +91,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Recipe, Flavor, IngredientCost, UserSettings, CalculationResult, InventoryFlavor, ShoppingItem, Mix, Order } from './types';
 import { calculateRecipe } from './lib/calculations';
-import { suggestRecipes, parseImportedRecipe, parseInvoice, resetGeminiService } from './services/geminiService';
+import { suggestRecipes, parseImportedRecipe, parseInvoice, resetGeminiService, getAiSubstitutions } from './services/geminiService';
 import { getSafetyWarnings, formatSafetyWarnings, getPotencyWarning } from './lib/safety';
 import { 
   auth, 
@@ -111,7 +116,8 @@ import {
   where, 
   getDocs, 
   writeBatch,
-  getDocFromServer
+  getDocFromServer,
+  increment
 } from 'firebase/firestore';
 
 enum OperationType {
@@ -164,14 +170,17 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   
   // Suppress errors that are expected when offline or transient
   const isSuppressedError = 
-    errInfo.error.includes('timed out') || 
-    errInfo.error.includes('offline') || 
-    errInfo.error.includes('network error') ||
-    errInfo.error.includes('Failed to get document because the client is offline') ||
-    errInfo.error.includes('unavailable') ||
-    errInfo.error.includes('Cloud operation timed out') ||
-    errInfo.error.includes('PERMISSION_DENIED') ||
-    errInfo.error.includes('installations');
+    errInfo.error.toLowerCase().includes('timed out') || 
+    errInfo.error.toLowerCase().includes('offline') || 
+    errInfo.error.toLowerCase().includes('network error') ||
+    errInfo.error.toLowerCase().includes('failed to get document because the client is offline') ||
+    errInfo.error.toLowerCase().includes('unavailable') ||
+    errInfo.error.toLowerCase().includes('cloud operation timed out') ||
+    errInfo.error.toLowerCase().includes('permission_denied') ||
+    errInfo.error.toLowerCase().includes('permission denied') ||
+    errInfo.error.toLowerCase().includes('installations') ||
+    errInfo.error.toLowerCase().includes('deadline exceeded') ||
+    errInfo.error.toLowerCase().includes('network-request-failed');
 
   if (isSuppressedError) {
     console.warn('Firestore Operation Status (Suppressed): ', JSON.stringify(errInfo));
@@ -182,11 +191,11 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   throw new Error(JSON.stringify(errInfo));
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 60000): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 120000): Promise<T> {
   return Promise.race([
     promise,
     new Promise<T>((_, reject) => 
-      setTimeout(() => reject(new Error('Cloud operation timed out. Please check your connection.')), timeoutMs)
+      setTimeout(() => reject(new Error('Cloud operation timed out. Please check your connection. If this persists, try syncing fewer items at once.')), timeoutMs)
     )
   ]);
 }
@@ -381,6 +390,7 @@ function formatFlavorName(name: string): string {
 interface Substitution {
   flavor: InventoryFlavor;
   multiplier: number;
+  rationale?: string;
 }
 
 function findSubstitutes(flavorName: string, inventory: InventoryFlavor[]): Substitution[] {
@@ -721,6 +731,13 @@ function AppContent() {
     return saved ? JSON.parse(saved) : [];
   });
   const [activeTab, setActiveTab] = useState('recipes');
+  const [visualTab, setVisualTab] = useState('recipes');
+  const [isPending, startTransition] = useTransition();
+
+  // Sync visualTab when activeTab changes (e.g. from popstate or deep links)
+  useEffect(() => {
+    setVisualTab(activeTab);
+  }, [activeTab]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [sortBy, setSortBy] = useState('newest');
@@ -781,6 +798,7 @@ function AppContent() {
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
   const [showSafetyDisclaimer, setShowSafetyDisclaimer] = useState(false);
   const [isViewingSafety, setIsViewingSafety] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(false);
   const [cookieConsent, setCookieConsent] = useState<boolean | null>(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('vape-cookie-consent') : null;
     return saved ? JSON.parse(saved) : null;
@@ -810,7 +828,7 @@ function AppContent() {
   }, [activeTab, cookieConsent]);
 
   // Version
-  const VERSION = "1.30.8";
+  const VERSION = "1.32.13";
 
   // History Navigation Support
   useEffect(() => {
@@ -884,6 +902,16 @@ function AppContent() {
       setShowSafetyDisclaimer(true);
     }
   }, [isAuthReady, isAppLoading, userSettings.acknowledgedSafety]);
+
+  // Show tutorial on first launch (after safety is acknowledged and safety disclaimer is closed)
+  useEffect(() => {
+    if (isAuthReady && !isAppLoading && userSettings.acknowledgedSafety === true) {
+      const viewed = localStorage.getItem('vape-tutorial-viewed');
+      if (viewed !== 'true' && !showSafetyDisclaimer) {
+        setShowTutorial(true);
+      }
+    }
+  }, [isAuthReady, isAppLoading, userSettings.acknowledgedSafety, showSafetyDisclaimer]);
 
   // Theme Management
   useEffect(() => {
@@ -998,6 +1026,11 @@ function AppContent() {
   }, [userSettings.geminiApiKey]);
 
   const prevUidRef = useRef<string | null>(null);
+  const lastCloudRecipesRef = useRef<Recipe[]>([]);
+  const lastCloudInventoryRef = useRef<InventoryFlavor[]>([]);
+  const lastCloudShoppingRef = useRef<ShoppingItem[]>([]);
+  const lastCloudOrdersRef = useRef<Order[]>([]);
+  const lastCloudMixesRef = useRef<Mix[]>([]);
 
   const resetState = useCallback(() => {
     setRecipes(INITIAL_RECIPES);
@@ -1005,6 +1038,11 @@ function AppContent() {
     setShoppingList([]);
     setMixes([]);
     setOrders([]);
+    lastCloudRecipesRef.current = [];
+    lastCloudInventoryRef.current = [];
+    lastCloudShoppingRef.current = [];
+    lastCloudOrdersRef.current = [];
+    lastCloudMixesRef.current = [];
     setUserSettings({
       geminiApiKey: '',
       defaultNicBaseMg: 100,
@@ -1142,15 +1180,84 @@ function AppContent() {
     const uid = user.uid;
 
     const unsubRecipes = onSnapshot(collection(db, 'users', uid, 'recipes'), (snapshot) => {
-      setRecipes(snapshot.docs.map(doc => doc.data() as Recipe));
+      const cloudRecipes = snapshot.docs.map(doc => doc.data() as Recipe);
+      lastCloudRecipesRef.current = cloudRecipes;
+      setRecipes(prev => {
+        const merged = [...cloudRecipes];
+        prev.forEach(localR => {
+          const cloudR = cloudRecipes.find(r => r.id === localR.id);
+          const isGuest = localR.uid === 'anonymous' || !localR.uid;
+          
+          if (!cloudR) {
+            merged.push(localR);
+          } else {
+            const localTime = localR.updatedAt || localR.createdAt || 0;
+            const cloudTime = cloudR.updatedAt || cloudR.createdAt || 0;
+            
+            if (localTime > cloudTime || (isGuest && localTime >= cloudTime)) {
+              const idx = merged.findIndex(r => r.id === localR.id);
+              if (idx !== -1) {
+                merged[idx] = { ...cloudR, ...localR, uid };
+              }
+            }
+          }
+        });
+        return merged;
+      });
     }, (err) => handleFirestoreError(err, OperationType.GET, `users/${uid}/recipes`));
 
     const unsubInventory = onSnapshot(collection(db, 'users', uid, 'inventory'), (snapshot) => {
-      setInventory(snapshot.docs.map(doc => doc.data() as InventoryFlavor));
+      const cloudInventory = snapshot.docs.map(doc => doc.data() as InventoryFlavor);
+      lastCloudInventoryRef.current = cloudInventory;
+      setInventory(prev => {
+        const merged = [...cloudInventory];
+        prev.forEach(localI => {
+          const cloudI = cloudInventory.find(i => i.name === localI.name);
+          const isGuest = localI.uid === 'anonymous' || !localI.uid;
+          
+          if (!cloudI) {
+            merged.push(localI);
+          } else {
+            const localTime = localI.updatedAt || 0;
+            const cloudTime = cloudI.updatedAt || 0;
+            
+            if (localTime > cloudTime || (isGuest && localTime >= cloudTime)) {
+              const idx = merged.findIndex(i => i.name === localI.name);
+              if (idx !== -1) {
+                merged[idx] = { ...cloudI, ...localI, uid };
+              }
+            }
+          }
+        });
+        return merged;
+      });
     }, (err) => handleFirestoreError(err, OperationType.GET, `users/${uid}/inventory`));
 
     const unsubShopping = onSnapshot(collection(db, 'users', uid, 'shoppingList'), (snapshot) => {
-      setShoppingList(snapshot.docs.map(doc => doc.data() as ShoppingItem));
+      const cloudShopping = snapshot.docs.map(doc => doc.data() as ShoppingItem);
+      lastCloudShoppingRef.current = cloudShopping;
+      setShoppingList(prev => {
+        const merged = [...cloudShopping];
+        prev.forEach(localS => {
+          const cloudS = cloudShopping.find(s => s.id === localS.id);
+          const isGuest = localS.uid === 'anonymous' || !localS.uid;
+          
+          if (!cloudS) {
+            merged.push(localS);
+          } else {
+            const localTime = localS.addedAt || 0;
+            const cloudTime = cloudS.addedAt || 0;
+            
+            if (localTime > cloudTime || (isGuest && localTime >= cloudTime)) {
+              const idx = merged.findIndex(s => s.id === localS.id);
+              if (idx !== -1) {
+                merged[idx] = { ...cloudS, ...localS, uid };
+              }
+            }
+          }
+        });
+        return merged;
+      });
     }, (err) => handleFirestoreError(err, OperationType.GET, `users/${uid}/shoppingList`));
 
     const unsubSettings = onSnapshot(doc(db, 'users', uid, 'settings', 'user_settings'), (docSnap) => {
@@ -1170,17 +1277,56 @@ function AppContent() {
     }, (err) => handleFirestoreError(err, OperationType.GET, `users/${uid}/settings/costs`));
 
     const unsubMixes = onSnapshot(collection(db, 'users', uid, 'mixes'), (snapshot) => {
-      setMixes(snapshot.docs.map(doc => doc.data() as Mix));
+      const cloudMixes = snapshot.docs.map(doc => doc.data() as Mix);
+      lastCloudMixesRef.current = cloudMixes;
+      setMixes(prev => {
+        const merged = [...cloudMixes];
+        prev.forEach(localM => {
+          const cloudM = cloudMixes.find(m => m.id === localM.id);
+          const isGuest = localM.uid === 'anonymous' || !localM.uid;
+          
+          if (!cloudM) {
+            merged.push(localM);
+          } else {
+            const localTime = localM.mixedAt || 0;
+            const cloudTime = cloudM.mixedAt || 0;
+            
+            if (localTime > cloudTime || (isGuest && localTime >= cloudTime)) {
+              const idx = merged.findIndex(m => m.id === localM.id);
+              if (idx !== -1) {
+                merged[idx] = { ...cloudM, ...localM, uid };
+              }
+            }
+          }
+        });
+        return merged;
+      });
     }, (err) => handleFirestoreError(err, OperationType.GET, `users/${uid}/mixes`));
 
     const unsubOrders = onSnapshot(collection(db, 'users', uid, 'orders'), (snapshot) => {
       const cloudOrders = snapshot.docs.map(doc => doc.data() as Order);
+      lastCloudOrdersRef.current = cloudOrders;
       setOrders(prev => {
-        // Merge strategy: Keep local orders that aren't in the cloud yet
-        // This prevents data loss if a local write hasn't succeeded yet
-        const cloudIds = new Set(cloudOrders.map(o => o.id));
-        const localOnly = prev.filter(o => !cloudIds.has(o.id) && (o.uid === 'anonymous' || o.uid === uid));
-        return [...cloudOrders, ...localOnly];
+        const merged = [...cloudOrders];
+        prev.forEach(localO => {
+          const cloudO = cloudOrders.find(o => o.id === localO.id);
+          const isGuest = localO.uid === 'anonymous' || !localO.uid;
+          
+          if (!cloudO) {
+            merged.push(localO);
+          } else {
+            const localTime = Math.max(localO.createdAt || 0, localO.receivedAt || 0);
+            const cloudTime = Math.max(cloudO.createdAt || 0, cloudO.receivedAt || 0);
+            
+            if (localTime > cloudTime || (isGuest && localTime >= cloudTime)) {
+              const idx = merged.findIndex(o => o.id === localO.id);
+              if (idx !== -1) {
+                merged[idx] = { ...cloudO, ...localO, uid };
+              }
+            }
+          }
+        });
+        return merged;
       });
     }, (err) => handleFirestoreError(err, OperationType.GET, `users/${uid}/orders`));
 
@@ -1248,33 +1394,36 @@ function AppContent() {
   };
 
   const handleTabChange = (value: string) => {
+    // If we're already on this tab, do nothing
+    if (value === activeTab) {
+      setVisualTab(value);
+      setPendingTab(null);
+      return;
+    }
+
     if (activeTab === 'calculator' && hasUnsavedChanges) {
       setPendingTab(value);
     } else {
-      setActiveTab(value);
-      if (value !== 'calculator') {
-        setEditingRecipe(null);
-      }
+      setVisualTab(value);
+      // Defer the heavy content switch to ensure the indicator moves instantly
+      setTimeout(() => {
+        setActiveTab(value);
+        if (value !== 'calculator') {
+          setEditingRecipe(null);
+        }
+      }, 0);
     }
   };
 
   const handleConfirmNavigate = (action: 'save' | 'new' | 'discard') => {
     if (action === 'discard') {
       setHasUnsavedChanges(false);
-      if (pendingTab) {
-        setActiveTab(pendingTab);
-        if (pendingTab !== 'calculator') setEditingRecipe(null);
-        setPendingTab(null);
-      } else {
-        // This was a "Cancel" from the editor itself
-        setEditingRecipe(null);
-        setActiveTab('recipes');
-      }
+      const target = pendingTab || 'recipes';
+      setVisualTab(target);
+      setActiveTab(target);
+      if (target !== 'calculator') setEditingRecipe(null);
+      setPendingTab(null);
     } else if (action === 'save' || action === 'new') {
-      // We need to trigger the save from the RecipeEditor
-      // But we can't easily reach into it. 
-      // Instead, we'll use a custom event or a ref.
-      // Let's use a custom event for simplicity.
       const event = new CustomEvent('trigger-recipe-save', { 
         detail: { saveAsNew: action === 'new' } 
       });
@@ -1332,38 +1481,127 @@ function AppContent() {
 
       // Sync Recipes
       recipes.forEach(r => {
-        operations.push({ ref: doc(db, 'users', uid, 'recipes', r.id), data: sanitizeForFirestore({ ...r, uid }) });
+        const cloudR = lastCloudRecipesRef.current.find(cr => cr.id === r.id);
+        const isGuest = r.uid === 'anonymous' || !r.uid;
+        
+        let shouldUpload = false;
+        if (!cloudR) {
+          shouldUpload = true; // Local only
+        } else {
+          const localTime = r.updatedAt || r.createdAt || 0;
+          const cloudTime = cloudR.updatedAt || cloudR.createdAt || 0;
+          if (localTime > cloudTime || isGuest) {
+            shouldUpload = true;
+          }
+        }
+        
+        if (shouldUpload) {
+          operations.push({ ref: doc(db, 'users', uid, 'recipes', r.id), data: sanitizeForFirestore({ ...r, uid }) });
+        }
       });
 
       // Sync Inventory
       inventory.forEach(i => {
-        operations.push({ ref: doc(db, 'users', uid, 'inventory', i.name.replace(/\//g, '_')), data: sanitizeForFirestore({ ...i, uid }) });
+        const docId = i.name.replace(/\//g, '_');
+        const cloudI = lastCloudInventoryRef.current.find(ci => ci.name === i.name);
+        const isGuest = i.uid === 'anonymous' || !i.uid;
+        
+        let shouldUpload = false;
+        if (!cloudI) {
+          shouldUpload = true; // Local only
+        } else {
+          const localTime = i.updatedAt || 0;
+          const cloudTime = cloudI.updatedAt || 0;
+          if (localTime > cloudTime || isGuest) {
+            shouldUpload = true;
+          }
+        }
+        
+        if (shouldUpload) {
+          operations.push({ ref: doc(db, 'users', uid, 'inventory', docId), data: sanitizeForFirestore({ ...i, uid }) });
+        }
       });
 
       // Sync Shopping List
       shoppingList.forEach(s => {
-        operations.push({ ref: doc(db, 'users', uid, 'shoppingList', s.id), data: sanitizeForFirestore({ ...s, uid }) });
+        const cloudS = lastCloudShoppingRef.current.find(cs => cs.id === s.id);
+        const isGuest = s.uid === 'anonymous' || !s.uid;
+        
+        let shouldUpload = false;
+        if (!cloudS) {
+          shouldUpload = true; // Local only
+        } else {
+          const localTime = s.addedAt || 0;
+          const cloudTime = cloudS.addedAt || 0;
+          if (localTime > cloudTime || isGuest) {
+            shouldUpload = true;
+          }
+        }
+        
+        if (shouldUpload) {
+          operations.push({ ref: doc(db, 'users', uid, 'shoppingList', s.id), data: sanitizeForFirestore({ ...s, uid }) });
+        }
       });
 
       // Sync Orders
       orders.forEach(o => {
-        operations.push({ ref: doc(db, 'users', uid, 'orders', o.id), data: sanitizeForFirestore({ ...o, uid }) });
+        const cloudO = lastCloudOrdersRef.current.find(co => co.id === o.id);
+        const isGuest = o.uid === 'anonymous' || !o.uid;
+        
+        let shouldUpload = false;
+        if (!cloudO) {
+          shouldUpload = true; // Local only
+        } else {
+          const localTime = Math.max(o.createdAt || 0, o.receivedAt || 0);
+          const cloudTime = Math.max(cloudO.createdAt || 0, cloudO.receivedAt || 0);
+          if (localTime > cloudTime || isGuest) {
+            shouldUpload = true;
+          }
+        }
+        
+        if (shouldUpload) {
+          operations.push({ ref: doc(db, 'users', uid, 'orders', o.id), data: sanitizeForFirestore({ ...o, uid }) });
+        }
       });
 
-      // Sync Settings
+      // Sync Mixes
+      mixes.forEach(m => {
+        const cloudM = lastCloudMixesRef.current.find(cm => cm.id === m.id);
+        const isGuest = m.uid === 'anonymous' || !m.uid;
+        
+        let shouldUpload = false;
+        if (!cloudM) {
+          shouldUpload = true; // Local only
+        } else {
+          const localTime = m.mixedAt || 0;
+          const cloudTime = cloudM.mixedAt || 0;
+          if (localTime > cloudTime || isGuest) {
+            shouldUpload = true;
+          }
+        }
+        
+        if (shouldUpload) {
+          operations.push({ ref: doc(db, 'users', uid, 'mixes', m.id), data: sanitizeForFirestore({ ...m, uid }) });
+        }
+      });
+
+      // Sync Settings (only if we actually have local settings)
       operations.push({ ref: doc(db, 'users', uid, 'settings', 'user_settings'), data: sanitizeForFirestore({ ...userSettings, uid }) });
       operations.push({ ref: doc(db, 'users', uid, 'settings', 'costs'), data: sanitizeForFirestore({ ...costs, uid }) });
 
-      // Chunk operations into batches of 500 (Firestore limit)
-      const CHUNK_SIZE = 450; // Use slightly less than 500 to be safe
-      for (let i = 0; i < operations.length; i += CHUNK_SIZE) {
-        const chunk = operations.slice(i, i + CHUNK_SIZE);
-        const batch = writeBatch(db);
-        chunk.forEach(op => batch.set(op.ref, op.data));
-        await withTimeout(batch.commit());
+      if (operations.length > 0) {
+        // Chunk operations into batches of 500 (Firestore limit)
+        const CHUNK_SIZE = 450; // Use slightly less than 500 to be safe
+        for (let i = 0; i < operations.length; i += CHUNK_SIZE) {
+          const chunk = operations.slice(i, i + CHUNK_SIZE);
+          const batch = writeBatch(db);
+          chunk.forEach(op => batch.set(op.ref, op.data));
+          await withTimeout(batch.commit());
+        }
+        console.log(`Cloud sync successful. Uploaded ${operations.length} entities.`);
+      } else {
+        console.log("No local changes to sync.");
       }
-      
-      console.log("Cloud sync successful");
     } catch (err) {
       console.error("Cloud sync failed:", err);
       const message = err instanceof Error ? err.message : "Failed to sync with cloud";
@@ -1380,7 +1618,7 @@ function AppContent() {
     } finally {
       setIsSyncing(false);
     }
-  }, [user, recipes, inventory, shoppingList, orders, userSettings, costs]);
+  }, [user, recipes, inventory, shoppingList, orders, mixes, userSettings, costs]);
 
   // Proactive sync when user logs in
   useEffect(() => {
@@ -1443,6 +1681,7 @@ function AppContent() {
       setDuplicateFound(duplicate);
       setPendingRecipe(normalizedRecipe);
       setPendingMix(mix || null);
+      setPendingTab(null); // Clear pending navigation since we're showing a conflict dialog
       return;
     }
 
@@ -1458,7 +1697,7 @@ function AppContent() {
     });
 
     if (mix) {
-      handleRecordMix(mix);
+      await handleRecordMix(mix);
     }
 
     if (user) {
@@ -1466,14 +1705,17 @@ function AppContent() {
       try {
         await withTimeout(setDoc(doc(db, 'users', uid, 'recipes', normalizedRecipe.id), sanitizeForFirestore({ ...normalizedRecipe, uid })));
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `users/${uid}/recipes/${normalizedRecipe.id}`);
+        console.error("Cloud sync failed:", err);
+        toast.error("Cloud sync failed, but recipe saved locally.");
       }
     }
     
     if (pendingTab) {
+      setVisualTab(pendingTab);
       setActiveTab(pendingTab);
       setPendingTab(null);
     } else {
+      setVisualTab('recipes');
       setActiveTab('recipes');
     }
     setEditingRecipe(null);
@@ -1491,7 +1733,7 @@ function AppContent() {
       
       if (pendingMix) {
         const updatedMix = { ...pendingMix, recipeId: duplicateFound.id, recipeName: updatedRecipe.name };
-        handleRecordMix(updatedMix);
+        await handleRecordMix(updatedMix);
       }
       
       setDuplicateFound(null);
@@ -1510,7 +1752,8 @@ function AppContent() {
         try {
           await withTimeout(setDoc(doc(db, 'users', uid, 'recipes', duplicateFound.id), sanitizeForFirestore({ ...updatedRecipe, uid })));
         } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `users/${uid}/recipes/${duplicateFound.id}`);
+          console.error("Cloud sync failed during overwrite:", err);
+          toast.error("Cloud sync failed, but recipe updated locally.");
         }
       }
 
@@ -1536,7 +1779,7 @@ function AppContent() {
 
       if (pendingMix) {
         const updatedMix = { ...pendingMix, recipeId: newRecipe.id, recipeName: newRecipe.name };
-        handleRecordMix(updatedMix);
+        await handleRecordMix(updatedMix);
       }
 
       setDuplicateFound(null);
@@ -1841,17 +2084,22 @@ function AppContent() {
       item.safetyWarnings = getSafetyWarnings(item.name);
     }
 
+    const timestampedItem = {
+      ...item,
+      updatedAt: Date.now()
+    };
+
     if (user) {
       const uid = user.uid;
-      const docId = item.name.replace(/\//g, '_');
+      const docId = timestampedItem.name.replace(/\//g, '_');
       try {
-        await withTimeout(setDoc(doc(db, 'users', uid, 'inventory', docId), sanitizeForFirestore({ ...item, uid })));
+        await withTimeout(setDoc(doc(db, 'users', uid, 'inventory', docId), sanitizeForFirestore({ ...timestampedItem, uid })));
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `users/${uid}/inventory/${item.name}`);
+        handleFirestoreError(err, OperationType.WRITE, `users/${uid}/inventory/${timestampedItem.name}`);
       }
     } else {
       setInventory(prev => {
-        const newInv = [...prev, item];
+        const newInv = [...prev, timestampedItem];
         localStorage.setItem('vape-inventory-v2', JSON.stringify(newInv));
         return newInv;
       });
@@ -1978,9 +2226,14 @@ function AppContent() {
       promptForDepletedFlavor(item.name);
     }
 
+    const timestampedItem = {
+      ...item,
+      updatedAt: Date.now()
+    };
+
     // Update local state immediately for snappy UI
     setInventory(prev => {
-      const newInv = prev.map(i => i.name === oldName ? item : i);
+      const newInv = prev.map(i => i.name === oldName ? timestampedItem : i);
       if (!user) {
         localStorage.setItem('vape-inventory-v2', JSON.stringify(newInv));
       }
@@ -1992,13 +2245,13 @@ function AppContent() {
       const batch = writeBatch(db);
       
       // If name changed, delete old doc and create new one
-      if (oldName !== item.name) {
+      if (oldName !== timestampedItem.name) {
         const oldDocId = oldName.replace(/\//g, '_');
         batch.delete(doc(db, 'users', uid, 'inventory', oldDocId));
       }
       
-      const newDocId = item.name.replace(/\//g, '_');
-      batch.set(doc(db, 'users', uid, 'inventory', newDocId), sanitizeForFirestore({ ...item, uid }));
+      const newDocId = timestampedItem.name.replace(/\//g, '_');
+      batch.set(doc(db, 'users', uid, 'inventory', newDocId), sanitizeForFirestore({ ...timestampedItem, uid }));
       
       try {
         await withTimeout(batch.commit());
@@ -2047,6 +2300,22 @@ function AppContent() {
 
     setMixes(prev => [...prev, mix]);
     
+    // Update the recipes state to reflect the new mix
+    setRecipes(prev => prev.map(r => {
+      if (r.id === mix.recipeId) {
+        // If the recipe already reflects this mix (e.g. from handleSaveRecipe), don't double-increment
+        if (r.lastMixedAt === mix.mixedAt) return r;
+        
+        return {
+          ...r,
+          lastMixedAt: mix.mixedAt,
+          mixCount: (r.mixCount || 0) + 1,
+          updatedAt: Date.now()
+        };
+      }
+      return r;
+    }));
+    
     // 1. Calculate cumulative decrements for each inventory item
     const inventoryDecrements: Record<string, number> = {};
     mix.flavors.forEach(f => {
@@ -2064,7 +2333,8 @@ function AppContent() {
       if (usedMl && invItem.volumeMl !== undefined) {
         return {
           ...invItem,
-          volumeMl: Number(Math.max(0, invItem.volumeMl - usedMl).toFixed(2))
+          volumeMl: Number(Math.max(0, invItem.volumeMl - usedMl).toFixed(2)),
+          updatedAt: Date.now()
         };
       }
       return invItem;
@@ -2088,6 +2358,14 @@ function AppContent() {
       try {
         const batch = writeBatch(db);
         batch.set(doc(db, 'users', uid, 'mixes', mix.id), sanitizeForFirestore({ ...mix, uid }));
+
+        // Update the recipe's mixed stats in the same batch for atomicity
+        const recipeRef = doc(db, 'users', uid, 'recipes', mix.recipeId);
+        batch.update(recipeRef, {
+          lastMixedAt: mix.mixedAt,
+          mixCount: increment(1),
+          updatedAt: Date.now()
+        });
         
         // 3. Firestore batch update using the calculated decrements
         Object.entries(inventoryDecrements).forEach(([invName, usedMl]) => {
@@ -2096,7 +2374,8 @@ function AppContent() {
             const docId = invItem.name.replace(/\//g, '_');
             const newVolume = Number(Math.max(0, invItem.volumeMl - usedMl).toFixed(2));
             batch.update(doc(db, 'users', uid, 'inventory', docId), { 
-              volumeMl: newVolume 
+              volumeMl: newVolume,
+              updatedAt: Date.now()
             });
           }
         });
@@ -2348,6 +2627,66 @@ function AppContent() {
     setMissingFlavorsToShop([]);
   };
 
+  const handleResyncMixStats = async () => {
+    if (recipes.length === 0 || mixes.length === 0) {
+      toast.info("No data to re-sync.");
+      return;
+    }
+
+    try {
+      toast.loading("Re-syncing mix statistics...", { id: 'resync' });
+      
+      const updatedRecipes = recipes.map(recipe => {
+        const recipeMixes = mixes.filter(m => m.recipeId === recipe.id);
+        if (recipeMixes.length === 0) {
+          // If no mixes found in history, we should clear the stats if they were incorrect
+          if (recipe.mixCount === 0 && !recipe.lastMixedAt) return recipe;
+          return {
+            ...recipe,
+            lastMixedAt: undefined,
+            mixCount: 0
+          };
+        }
+
+        // Sort by date descending to find the last mixed date
+        const sortedMixes = [...recipeMixes].sort((a, b) => b.mixedAt - a.mixedAt);
+        const lastMixedAt = sortedMixes[0].mixedAt;
+        const mixCount = recipeMixes.length;
+
+        // Only update if something changed
+        if (recipe.lastMixedAt === lastMixedAt && recipe.mixCount === mixCount) {
+          return recipe;
+        }
+
+        return {
+          ...recipe,
+          lastMixedAt,
+          mixCount
+        };
+      });
+
+      setRecipes(updatedRecipes);
+
+      // If user is logged in, perform updates to Firestore
+      if (user) {
+        const uid = user.uid;
+        // Batch updates are limited to 500 operations
+        // If there are many recipes, we might need multiple batches
+        const updatePromises = updatedRecipes.map(recipe => {
+          const recipeRef = doc(db, 'users', uid, 'recipes', recipe.id);
+          return setDoc(recipeRef, sanitizeForFirestore({ ...recipe, uid }), { merge: true });
+        });
+
+        await Promise.all(updatePromises);
+      }
+
+      toast.success("Successfully re-synced all recipe statistics!", { id: 'resync' });
+    } catch (err) {
+      console.error("Re-sync failed:", err);
+      toast.error("Failed to re-sync data. Please try again.", { id: 'resync' });
+    }
+  };
+
   const handleDeleteAllData = async () => {
     if (user) {
       const uid = user.uid;
@@ -2439,7 +2778,7 @@ function AppContent() {
     });
   }, [recipes, searchQuery, selectedCategory, showOnlyAvailable, sortBy, inventory]);
 
-  const handleSuggest = async (preferences?: string) => {
+  const handleSuggest = async (preferences?: string, allowOutOfStash: boolean = true) => {
     setIsAiLoading(true);
     try {
       const inventoryNames = inventory.map(i => i.name);
@@ -2493,7 +2832,8 @@ function AppContent() {
           category: 'AI',
           flavor_count: inventoryNames.length,
           positive_feedback_count: positiveFeedback.length,
-          negative_feedback_count: negativeFeedback.length
+          negative_feedback_count: negativeFeedback.length,
+          allow_out_of_stash: allowOutOfStash
         });
       }
       const suggestions = await suggestRecipes(
@@ -2502,7 +2842,8 @@ function AppContent() {
         userSettings.geminiApiKey,
         userSettings.aiCustomInstructions,
         positiveFeedback,
-        negativeFeedback
+        negativeFeedback,
+        allowOutOfStash
       );
       setAiSuggestions(suggestions);
     } catch (error: any) {
@@ -2688,6 +3029,11 @@ function AppContent() {
         showAcknowledgeButton={false}
       />
 
+      <TutorialDialog 
+        open={showTutorial} 
+        onOpenChange={setShowTutorial} 
+      />
+
       <ImportRecipeDialog 
         open={isImporting} 
         onOpenChange={setIsImporting} 
@@ -2788,250 +3134,305 @@ function AppContent() {
             </Button>
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setPendingTab(null)}>Stay on Page</Button>
+            <Button variant="ghost" onClick={() => {
+              setPendingTab(null);
+              setVisualTab(activeTab);
+            }}>Stay on Page</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       <main className="max-w-4xl mx-auto p-4">
-        <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
+        <Tabs value={visualTab} onValueChange={handleTabChange} className="w-full">
           <TabsList className="hidden md:grid w-full grid-cols-4 mb-8">
-            <TabsTrigger value="recipes" className="gap-2"><Book className="w-4 h-4" /> Recipes</TabsTrigger>
-            <TabsTrigger value="calculator" className="gap-2"><PlusCircle className="w-4 h-4" /> New Mix</TabsTrigger>
-            <TabsTrigger value="inventory" className="gap-2"><Droplets className="w-4 h-4" /> Inventory</TabsTrigger>
-            <TabsTrigger value="ai" className="gap-2"><Sparkles className="w-4 h-4" /> AI Lab</TabsTrigger>
+            <TabsTrigger value="recipes" className="relative group">
+              <motion.div whileTap={{ scale: 0.97 }} className="flex items-center gap-2">
+                <Book className="w-4 h-4" /> Recipes
+              </motion.div>
+            </TabsTrigger>
+            <TabsTrigger value="calculator" className="relative group">
+              <motion.div whileTap={{ scale: 0.97 }} className="flex items-center gap-2">
+                <PlusCircle className="w-4 h-4" /> New Mix
+              </motion.div>
+            </TabsTrigger>
+            <TabsTrigger value="inventory" className="relative group">
+              <motion.div whileTap={{ scale: 0.97 }} className="flex items-center gap-2">
+                <Droplets className="w-4 h-4" /> Inventory
+              </motion.div>
+            </TabsTrigger>
+            <TabsTrigger value="ai" className="relative group">
+              <motion.div whileTap={{ scale: 0.97 }} className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4" /> AI Lab
+              </motion.div>
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="recipes" className="mt-0">
-            <div className="flex flex-col gap-4">
-              <div className="space-y-4">
-                <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
-                  <div className="relative flex-1">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
-                    <Input 
-                      placeholder="Search recipes or ingredients..." 
-                      className="h-10 pl-10 pr-10 bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                    />
-                    {searchQuery && (
-                      <button 
-                        onClick={() => setSearchQuery('')}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors"
+            {activeTab === 'recipes' ? (
+              <div className="flex flex-col gap-4">
+                <div className="space-y-4">
+                  <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
+                      <Input 
+                        placeholder="Search recipes or ingredients..." 
+                        className="h-10 pl-10 pr-10 bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                      />
+                      {searchQuery && (
+                        <button 
+                          onClick={() => setSearchQuery('')}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <Button 
+                        variant="outline" 
+                        className="h-10 gap-2 px-3 bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800 dark:text-neutral-300"
+                        onClick={() => setIsImporting(true)}
                       >
-                        <X className="w-4 h-4" />
-                      </button>
-                    )}
+                        <Download className="w-4 h-4" />
+                        <span className="hidden sm:inline">Import</span>
+                      </Button>
+                      <Select value={selectedCategory} onValueChange={setSelectedCategory}>
+                        <SelectTrigger className="h-10 w-full sm:w-[140px] bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800">
+                          <SelectValue placeholder="Category">
+                            {selectedCategory === 'All' ? 'All Categories' : selectedCategory}
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="All">All Categories</SelectItem>
+                          {CATEGORIES.map(cat => (
+                            <SelectItem key={cat} value={cat}>{cat}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Select value={sortBy} onValueChange={setSortBy}>
+                        <SelectTrigger className="h-10 w-full sm:w-[120px] bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800">
+                          <SelectValue placeholder="Sort by">
+                            {RECIPE_SORT_OPTIONS[sortBy]}
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="newest">Newest</SelectItem>
+                          <SelectItem value="name">Name</SelectItem>
+                          <SelectItem value="rating">Rating</SelectItem>
+                          <SelectItem value="lastMixed">Last Mixed</SelectItem>
+                          <SelectItem value="mostMixed">Most Mixed</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
-                  <div className="flex gap-2 items-center">
+                  
+                  <div className="flex items-center gap-2">
                     <Button 
-                      variant="outline" 
-                      className="h-10 gap-2 px-3 bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800 dark:text-neutral-300"
-                      onClick={() => setIsImporting(true)}
+                      variant={showOnlyAvailable ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setShowOnlyAvailable(!showOnlyAvailable)}
+                      className={`h-8 text-xs ${showOnlyAvailable ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800 text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800'}`}
                     >
-                      <Download className="w-4 h-4" />
-                      <span className="hidden sm:inline">Import</span>
+                      {showOnlyAvailable ? <Check className="w-3 h-3 mr-1" /> : null}
+                      Available Flavors Only
                     </Button>
-                    <Select value={selectedCategory} onValueChange={setSelectedCategory}>
-                      <SelectTrigger className="h-10 w-full sm:w-[140px] bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800">
-                        <SelectValue placeholder="Category">
-                          {selectedCategory === 'All' ? 'All Categories' : selectedCategory}
-                        </SelectValue>
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="All">All Categories</SelectItem>
-                        {CATEGORIES.map(cat => (
-                          <SelectItem key={cat} value={cat}>{cat}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Select value={sortBy} onValueChange={setSortBy}>
-                      <SelectTrigger className="h-10 w-full sm:w-[120px] bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800">
-                        <SelectValue placeholder="Sort by">
-                          {RECIPE_SORT_OPTIONS[sortBy]}
-                        </SelectValue>
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="newest">Newest</SelectItem>
-                        <SelectItem value="name">Name</SelectItem>
-                        <SelectItem value="rating">Rating</SelectItem>
-                        <SelectItem value="lastMixed">Last Mixed</SelectItem>
-                        <SelectItem value="mostMixed">Most Mixed</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <span className="text-[10px] text-neutral-400 uppercase tracking-wider font-semibold ml-auto">
+                      {filteredRecipes.length} Recipes
+                    </span>
                   </div>
                 </div>
-                
-                <div className="flex items-center gap-2">
-                  <Button 
-                    variant={showOnlyAvailable ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setShowOnlyAvailable(!showOnlyAvailable)}
-                    className={`h-8 text-xs ${showOnlyAvailable ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800 text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800'}`}
-                  >
-                    {showOnlyAvailable ? <Check className="w-3 h-3 mr-1" /> : null}
-                    Available Flavors Only
-                  </Button>
-                  <span className="text-[10px] text-neutral-400 uppercase tracking-wider font-semibold ml-auto">
-                    {filteredRecipes.length} Recipes
-                  </span>
-                </div>
-              </div>
 
-              <div className="grid gap-3">
-                {filteredRecipes.map(recipe => (
-                  <RecipeCard 
-                    key={recipe.id} 
-                    recipe={recipe} 
-                    inventory={inventory}
-                    shoppingList={shoppingList}
-                    orders={orders}
-                    mixes={mixes.filter(m => m.recipeId === recipe.id)}
-                    onEdit={() => {
-                      setEditingRecipe(recipe);
-                      setActiveTab('calculator');
-                    }}
-                    onDelete={() => handleDeleteRecipe(recipe)}
-                    onUpdateRating={(rating) => handleUpdateRating(recipe.id, rating)}
-                    onUpdateMixRating={handleUpdateMixRating}
-                    onUpdateMixNotes={handleUpdateMixNotes}
-                    onEditFlavor={(flavorName) => {
-                      const normalizedName = normalizeFlavorName(flavorName);
-                      const existing = inventory.find(i => isFlavorMatch(i.name, normalizedName));
-                      if (existing) {
-                        startEditing(existing);
-                      } else {
-                        setFlavorToAddChoice(normalizedName);
-                      }
-                    }}
-                  />
-                ))}
-                {filteredRecipes.length === 0 && (
-                  <div className="text-center py-12 text-neutral-500">
-                    <Book className="w-12 h-12 mx-auto mb-3 opacity-20" />
-                    <p>No recipes found. Start by creating one!</p>
-                  </div>
-                )}
+                <div className="grid gap-3">
+                  {filteredRecipes.map(recipe => (
+                    <RecipeCard 
+                      key={recipe.id} 
+                      recipe={recipe} 
+                      inventory={inventory}
+                      shoppingList={shoppingList}
+                      orders={orders}
+                      mixes={mixes.filter(m => m.recipeId === recipe.id)}
+                      onEdit={() => {
+                        setEditingRecipe(recipe);
+                        handleTabChange('calculator');
+                      }}
+                      onDelete={() => handleDeleteRecipe(recipe)}
+                      onUpdateRating={(rating) => handleUpdateRating(recipe.id, rating)}
+                      onUpdateMixRating={handleUpdateMixRating}
+                      onUpdateMixNotes={handleUpdateMixNotes}
+                      onEditFlavor={(flavorName) => {
+                        const normalizedName = normalizeFlavorName(flavorName);
+                        const existing = inventory.find(i => isFlavorMatch(i.name, normalizedName));
+                        if (existing) {
+                          startEditing(existing);
+                        } else {
+                          setFlavorToAddChoice(normalizedName);
+                        }
+                      }}
+                    />
+                  ))}
+                  {filteredRecipes.length === 0 && (
+                    <div className="text-center py-12 text-neutral-500">
+                      <Book className="w-12 h-12 mx-auto mb-3 opacity-20" />
+                      <p>No recipes found. Start by creating one!</p>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-6 animate-pulse">
+                <div className="h-10 bg-neutral-100 dark:bg-neutral-800 rounded-lg w-full" />
+                <div className="grid gap-4">
+                  <div className="h-32 bg-neutral-50 dark:bg-neutral-800/50 rounded-xl" />
+                  <div className="h-32 bg-neutral-50 dark:bg-neutral-800/50 rounded-xl" />
+                  <div className="h-32 bg-neutral-50 dark:bg-neutral-800/50 rounded-xl" />
+                </div>
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent value="calculator" className="mt-0 overflow-visible">
-            <RecipeEditor 
-              recipe={editingRecipe} 
-              recipes={recipes}
-              inventory={inventory}
-              onSave={handleSaveRecipe} 
-              onCancel={() => {
-                if (hasUnsavedChanges) {
-                  setPendingTab('recipes');
-                } else {
-                  setEditingRecipe(null);
-                  setActiveTab('recipes');
-                }
-              }}
-              costs={costs}
-              userSettings={userSettings}
-              shoppingList={shoppingList}
-              orders={orders}
-              onAddInventoryItem={addInventoryItem}
-              onAddShoppingItem={addShoppingItem}
-              setHasUnsavedChanges={setHasUnsavedChanges}
-              onStartEditingFlavor={startEditing}
-              onAddFlavorChoice={setFlavorToAddChoice}
-            />
+            {activeTab === 'calculator' ? (
+              <RecipeEditor 
+                recipe={editingRecipe} 
+                recipes={recipes}
+                inventory={inventory}
+                onSave={handleSaveRecipe} 
+                onCancel={() => {
+                  if (hasUnsavedChanges) {
+                    setPendingTab('recipes');
+                  } else {
+                    setEditingRecipe(null);
+                    setActiveTab('recipes');
+                  }
+                }}
+                costs={costs}
+                userSettings={userSettings}
+                shoppingList={shoppingList}
+                orders={orders}
+                onAddInventoryItem={addInventoryItem}
+                onAddShoppingItem={addShoppingItem}
+                setHasUnsavedChanges={setHasUnsavedChanges}
+                onStartEditingFlavor={startEditing}
+                onAddFlavorChoice={setFlavorToAddChoice}
+              />
+            ) : (
+              <div className="h-[600px] bg-neutral-50 dark:bg-neutral-800/20 rounded-xl animate-pulse" />
+            )}
           </TabsContent>
 
           <TabsContent value="inventory" className="mt-0">
-            <InventoryManager 
-              inventory={inventory} 
-              recipes={recipes}
-              shoppingList={shoppingList}
-              orders={orders}
-              onAddInventoryItem={addInventoryItem}
-              onRemoveInventoryItem={removeInventoryItem}
-              onUpdateInventoryItem={updateInventoryItem}
-              onAddShoppingItem={addShoppingItem}
-              onRemoveShoppingItem={removeShoppingItem}
-              onClearShoppingList={clearShoppingList}
-              onMarkOrderReceived={handleMarkOrderReceived}
-              onDeleteOrder={handleDeleteOrder}
-              userSettings={userSettings}
-              onImportInvoice={openInvoiceImport}
-              onImportStash={openStashImport}
-              onFilterRecipes={handleFilterRecipes}
-              onStartEditingFlavor={startEditing}
-              onAddFlavorChoice={setFlavorToAddChoice}
-              sharedEditingItem={editingItem}
-              setSharedEditingItem={setEditingItem}
-            />
+            {activeTab === 'inventory' ? (
+              <InventoryManager 
+                inventory={inventory} 
+                recipes={recipes}
+                shoppingList={shoppingList}
+                orders={orders}
+                onAddInventoryItem={addInventoryItem}
+                onRemoveInventoryItem={removeInventoryItem}
+                onUpdateInventoryItem={updateInventoryItem}
+                onAddShoppingItem={addShoppingItem}
+                onRemoveShoppingItem={removeShoppingItem}
+                onClearShoppingList={clearShoppingList}
+                onMarkOrderReceived={handleMarkOrderReceived}
+                onDeleteOrder={handleDeleteOrder}
+                userSettings={userSettings}
+                onImportInvoice={openInvoiceImport}
+                onImportStash={openStashImport}
+                onFilterRecipes={handleFilterRecipes}
+                onStartEditingFlavor={startEditing}
+                onAddFlavorChoice={setFlavorToAddChoice}
+                sharedEditingItem={editingItem}
+                setSharedEditingItem={setEditingItem}
+              />
+            ) : (
+              <div className="h-[600px] bg-neutral-50 dark:bg-neutral-800/20 rounded-xl animate-pulse" />
+            )}
           </TabsContent>
 
           <TabsContent value="ai" className="mt-0">
-            <AiLab 
-              inventory={inventory.map(i => i.name)} 
-              suggestions={aiSuggestions} 
-              onSuggest={handleSuggest} 
-              isLoading={isAiLoading}
-              onUseRecipe={(recipe) => {
-                setEditingRecipe({
-                  ...recipe,
-                  id: Math.random().toString(36).substr(2, 9),
-                  servingMl: userSettings.defaultServingMl,
-                  targetNicMg: userSettings.defaultTargetNicMg,
-                  targetPgRatio: userSettings.defaultTargetPgRatio,
-                  nicBaseMg: userSettings.defaultNicBaseMg,
-                  nicBaseType: userSettings.defaultNicBaseType,
-                  createdAt: Date.now(),
-                  updatedAt: Date.now(),
-                  source: 'ai'
-                });
-                setActiveTab('calculator');
-              }}
-              runtimeKey={runtimeKey}
-              userSettings={userSettings}
-              onUpdateSettings={handleUpdateUserSettings}
-              isOnline={isOnline}
-            />
+            {activeTab === 'ai' ? (
+              <AiLab 
+                inventory={inventory.map(i => i.name)} 
+                orders={orders}
+                shoppingList={shoppingList}
+                suggestions={aiSuggestions} 
+                onSuggest={handleSuggest} 
+                isLoading={isAiLoading}
+                onUseRecipe={(aiRecipe) => {
+                  // Map AI schema to internal Recipe schema
+                  const recipe = {
+                    name: aiRecipe.recipeName,
+                    description: `${aiRecipe.description}\n\nRationale: ${aiRecipe.rationale}`,
+                    flavors: aiRecipe.ingredients.map((ing: any) => ({
+                      id: Math.random().toString(36).substr(2, 9),
+                      name: ing.name,
+                      percentage: ing.percentage,
+                      notes: ing.inStash ? '' : 'Recommended Addition (Not in stash)'
+                    })),
+                    steepingDays: aiRecipe.steepTimeDays,
+                  };
+
+                  setEditingRecipe({
+                    ...recipe,
+                    id: Math.random().toString(36).substr(2, 9),
+                    servingMl: userSettings.defaultServingMl,
+                    targetNicMg: userSettings.defaultTargetNicMg,
+                    targetPgRatio: userSettings.defaultTargetPgRatio,
+                    nicBaseMg: userSettings.defaultNicBaseMg,
+                    nicBaseType: userSettings.defaultNicBaseType,
+                    createdAt: Date.now(),
+                    updatedAt: Date.now(),
+                    source: 'ai'
+                  });
+                  handleTabChange('calculator');
+                }}
+                runtimeKey={runtimeKey}
+                userSettings={userSettings}
+                onUpdateSettings={handleUpdateUserSettings}
+                isOnline={isOnline}
+              />
+            ) : (
+              <div className="h-[600px] bg-neutral-50 dark:bg-neutral-800/20 rounded-xl animate-pulse" />
+            )}
           </TabsContent>
 
           <TabsContent value="settings" className="mt-0">
-            <SettingsPanel 
-              costs={costs} 
-              onUpdate={handleUpdateCosts} 
-              userSettings={userSettings}
-              onUpdateSettings={handleUpdateUserSettings}
-              runtimeKey={runtimeKey} 
-              user={user}
-              onLogin={handleLogin}
-              onLogout={handleLogout}
-              onSync={syncLocalToCloud}
-              isSyncing={isSyncing}
-              syncError={syncError}
-              onExport={handleExportData}
-              onImport={handleImportData}
-              onDeleteAllData={handleDeleteAllData}
-              onOpenPrivacy={() => setShowPrivacyPolicy(true)}
-              onOpenSafety={() => setIsViewingSafety(true)}
-            />
+            {activeTab === 'settings' ? (
+              <SettingsPanel 
+                costs={costs} 
+                onUpdate={handleUpdateCosts} 
+                userSettings={userSettings}
+                onUpdateSettings={handleUpdateUserSettings}
+                runtimeKey={runtimeKey} 
+                user={user}
+                onLogin={handleLogin}
+                onLogout={handleLogout}
+                onSync={syncLocalToCloud}
+                isSyncing={isSyncing}
+                syncError={syncError}
+                onExport={handleExportData}
+                onImport={handleImportData}
+                onDeleteAllData={handleDeleteAllData}
+                onResyncStats={handleResyncMixStats}
+                onOpenPrivacy={() => setShowPrivacyPolicy(true)}
+                onOpenSafety={() => setIsViewingSafety(true)}
+                onOpenTutorial={() => setShowTutorial(true)}
+              />
+            ) : (
+              <div className="h-[600px] bg-neutral-50 dark:bg-neutral-800/20 rounded-xl animate-pulse" />
+            )}
           </TabsContent>
         </Tabs>
       </main>
 
       {/* Mobile Navigation */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white dark:bg-neutral-900 border-t border-neutral-200 dark:border-neutral-800 md:hidden flex justify-around p-2 z-20">
-        <MobileNavItem active={activeTab === 'recipes'} onClick={() => handleTabChange('recipes')} icon={<Book className="w-5 h-5" />} label="Recipes" />
-        <MobileNavItem active={activeTab === 'calculator'} onClick={() => { 
-          if (activeTab === 'calculator' && hasUnsavedChanges) {
-            // Already here but might want to reset or something? 
-            // Usually clicking current tab does nothing.
-          } else {
-            setEditingRecipe(null); 
-            handleTabChange('calculator'); 
-          }
-        }} icon={<PlusCircle className="w-5 h-5" />} label="Mix" />
-        <MobileNavItem active={activeTab === 'inventory'} onClick={() => handleTabChange('inventory')} icon={<Droplets className="w-5 h-5" />} label="Stash" />
-        <MobileNavItem active={activeTab === 'ai'} onClick={() => handleTabChange('ai')} icon={<Sparkles className="w-5 h-5" />} label="AI" />
+        <MobileNavItem active={visualTab === 'recipes'} onClick={() => handleTabChange('recipes')} icon={<Book className="w-5 h-5" />} label="Recipes" />
+        <MobileNavItem active={visualTab === 'calculator'} onClick={() => handleTabChange('calculator')} icon={<PlusCircle className="w-5 h-5" />} label="Mix" />
+        <MobileNavItem active={visualTab === 'inventory'} onClick={() => handleTabChange('inventory')} icon={<Droplets className="w-5 h-5" />} label="Stash" />
+        <MobileNavItem active={visualTab === 'ai'} onClick={() => handleTabChange('ai')} icon={<Sparkles className="w-5 h-5" />} label="AI" />
       </nav>
 
       <div className="text-center py-10 pb-28 md:pb-12 space-y-3 bg-neutral-50/50 dark:bg-neutral-900/50 border-t border-neutral-100 dark:border-neutral-800 mt-8">
@@ -3305,13 +3706,14 @@ function PrivacyPolicyDialog({ open, onOpenChange }: { open: boolean, onOpenChan
 
 function MobileNavItem({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: ReactNode, label: string }) {
   return (
-    <button 
+    <motion.button 
+      whileTap={{ scale: 0.92 }}
       onClick={onClick}
-      className={`flex flex-col items-center gap-1 p-2 transition-colors ${active ? 'text-neutral-900 dark:text-neutral-100' : 'text-neutral-400 dark:text-neutral-600'}`}
+      className={`flex flex-col items-center gap-1 p-2 transition-colors relative ${active ? 'text-neutral-900 dark:text-neutral-100' : 'text-neutral-400 dark:text-neutral-600'}`}
     >
       {icon}
       <span className="text-[10px] font-medium uppercase tracking-wider">{label}</span>
-    </button>
+    </motion.button>
   );
 }
 
@@ -3374,7 +3776,11 @@ function ImportRecipeDialog({
       const content = importText.trim();
       if (!content) throw new Error("Please paste the recipe text to import.");
 
-      const parsed = await parseImportedRecipe(content, userSettings.geminiApiKey);
+      const parsed = await parseImportedRecipe(content, userSettings.geminiApiKey, {
+        servingMl: userSettings.defaultServingMl,
+        targetNicMg: userSettings.defaultTargetNicMg,
+        targetPgRatio: userSettings.defaultTargetPgRatio
+      });
       
       if (!parsed.recipeFound || !parsed.flavors || parsed.flavors.length === 0) {
         throw new Error(`Could not find a valid e-liquid recipe in the pasted text. Please make sure you copied the ${flavors()} list and percentages.`);
@@ -3820,20 +4226,143 @@ function DuplicateInventoryDialog({
 
 const VERSION_HISTORY = [
   {
+    version: "1.32.13",
+    date: "June 1, 2026",
+    changes: [
+      "Mix Calculator: Fixed an application crash that occurred when deleting or clearing out the numbers in the base nicotine strength field."
+    ]
+  },
+  {
+    version: "1.32.12",
+    date: "May 25, 2026",
+    changes: [
+      "AI Lab Optimization: Solved model profile bias issues where user-preferred custom flavours were overridden by past ratings. The model now guarantees the representation of all explicitly requested flavour components.",
+      "Balanced AI Synthesis: Ensured historic high/low ratings calibrate flavor styles or intensities without excluding active prompt instructions."
+    ]
+  },
+  {
+    version: "1.32.11",
+    date: "May 19, 2026",
+    changes: [
+      "UI Refinement: Removed the 'Sort by:' label in Flavour Stash header to resolve row-wrapping layouts on smaller screens, keeping the visual layout clean and utilizing intuitive icons."
+    ]
+  },
+  {
+    version: "1.32.10",
+    date: "May 19, 2026",
+    changes: [
+      "Feature: Added a Stash Export feature. You can now easily export your entire flavor inventory (stash) as a CSV spreadsheet or clean formatted text for forum sharing, notes, or back-up.",
+      "Symmetry: CSV exports maintain standard ATF/ELR headers to allow seamless re-importation."
+    ]
+  },
+  {
+    version: "1.32.9",
+    date: "May 19, 2026",
+    changes: [
+      "AI High-Demand Fix: Upgraded older preview models to latest stable 'gemini-3.5-flash' to eliminate rate-limit and transient 503 unavailability service errors.",
+      "Reliability Enhancement: Added automatic retry capabilities with exponential backoff on transient network errors or high demand spikes."
+    ]
+  },
+  {
+    version: "1.32.8",
+    date: "May 16, 2026",
+    changes: [
+      "Maintenance: Added a 'Re-sync Mix Stats' tool to settings to repair recipe statistics based on historical mix data.",
+      "Reliability: Improved automatic detection of last mixed dates when saving and mixing recipes."
+    ]
+  },
+  {
+    version: "1.32.7",
+    date: "May 16, 2026",
+    changes: [
+      "Bug Fix: Fixed an issue where recorded mixes were not correctly updating the recipe statistics (mix count and last mixed date).",
+      "Reliability: Improved synchronization between mix history and recipe stats to ensure accurate sorting by 'Last Mixed'."
+    ]
+  },
+  {
+    version: "1.32.6",
+    date: "May 16, 2026",
+    changes: [
+      "AI Lab: Significantly improved the diversity of recipe suggestions. The AI now prioritizes unused flavors in your stash and explores new flavor profiles while still respecting your taste preferences.",
+      "Intelligence: Updated the mixologist prompt to encourage 'adventurous' and 'complex' explorations alongside safe refinements."
+    ]
+  },
+  {
+    version: "1.32.5",
+    date: "May 15, 2026",
+    changes: [
+      "Bug Fix: Fixed an issue where the target PG/VG ratio wasn't respecting global user preferences during recipe imports.",
+      "Importing: Improved AI parsing to use your personal defaults when a recipe doesn't explicitly specify volumes or ratios."
+    ]
+  },
+  {
+    version: "1.32.4",
+    date: "May 15, 2026",
+    changes: [
+      "Bug Fix: Resolved an issue where 'Save & Exit' could hang when switching tabs with unsaved changes.",
+      "Navigation: Improved 'Stay on Page' logic to ensure the app stays exactly where you left off.",
+      "Reliability: Added smoother fallbacks for cloud syncing during temporary network interruptions."
+    ]
+  },
+  {
+    version: "1.32.3",
+    date: "May 14, 2026",
+    changes: [
+      "Snappier Feel: High-performance navigation that reacts instantly to your touch while keeping the classic clean style.",
+      "Optimized Performance: Improved background loading to keep everything smooth during heavy use.",
+      "Reliability: Sharper handling of browser back/forward buttons and deep links for a more robust experience."
+    ]
+  },
+  {
+    version: "1.32.2",
+    date: "May 14, 2026",
+    changes: [
+      "Cleaner Look: Simplified the AI recipe view by using clear color-coded badges instead of busy text labels.",
+      "Visual Consistency: Standardized colors across the app for easier identification (Green: In Stock, Purple: On Order, Blue: On Shopping List, Red: Missing)."
+    ]
+  },
+  {
+    version: "1.32.1",
+    date: "May 14, 2026",
+    changes: [
+      "Stability: Improved handling of temporary network issues to prevent interrupted sessions.",
+      "Performance: Quieted background errors to keep your experience focused and clean."
+    ]
+  },
+  {
+    version: "1.32.0",
+    date: "May 14, 2026",
+    changes: [
+      "AI Swaps: Introducing expert flavor matches! If you're missing a flavor, use 'AI Find Match' for smart substitution suggestions.",
+      "Smart Scaling: The AI now automatically adjusts percentages for substituted flavors based on their specific strengths.",
+      "Why it works: See a clear explanation for every suggested swap so you can mix with confidence.",
+      "Better UX: Added clear loading states and helpful tips to guide you through flavor substitutions."
+    ]
+  },
+  {
+    version: "1.31.0",
+    date: "May 14, 2026",
+    changes: [
+      "Better Recipes: Updated the AI to create better-balanced flavor profiles with improved mixing logic.",
+      "Learning from You: The AI now learns from your highly-rated recipes to better understand your personal taste.",
+      "Visibility: Clearly marked missing items as 'Out of Stock' and added support for international flavor spellings."
+    ]
+  },
+  {
     version: "1.30.8",
     date: "May 14, 2026",
     changes: [
-      "Reliability: Increased Cloud Sync timeout to 60s and added automatic retry logic for large inventories.",
-      "Performance: Debounced local storage persistence and isolated UI re-renders to eliminate lag with 500+ items.",
-      "Stability: Memoized core state handlers to prevent unnecessary component updates."
+      "Reliability: Improved cloud syncing for users with very large flavor collections.",
+      "Performance: Optimized the app to handle hundreds of items without any lag.",
+      "Stability: Smoothed out the user interface to ensure a faster, flicker-free experience."
     ]
   },
   {
     version: "1.30.7",
     date: "May 14, 2026",
     changes: [
-      "Normalization: Added intelligent handling for WS-23 cooling agent variations. 'Ws23', 'WS 23', and 'WS-23 cooling agent' are now automatically unified to 'WS-23'.",
-      "Matching: Improved duplicate detection to ensure all cooling agent variations are correctly identified across stash and recipes."
+      "Stash Matching: Added smart handling for cooling agents like 'WS-23' so different spellings are automatically recognized as the same item.",
+      "Reliability: Improved duplicate checking to keep your stash clean and organized."
     ]
   },
   {
@@ -3903,7 +4432,7 @@ const VERSION_HISTORY = [
     version: "1.29.7",
     date: "May 11, 2026",
     changes: [
-      "Mixing Precision: Enhanced drop calculations with viscosity-based estimation (PG/VG weighted).",
+      "Mixing Precision: Enhanced drop calculations with viscosity-based estimation and added support for custom PG/VG ratios in nicotine bases.",
       "Flavor Breakdown: Added drop counts for all flavors in mixing results for easier manual mixing."
     ]
   },
@@ -4726,6 +5255,40 @@ function RecipeEditor({
   const [isMixingAction, setIsMixingAction] = useState(false);
   const [flavorToDelete, setFlavorToDelete] = useState<string | null>(null);
   const [expandedFlavorNotes, setExpandedFlavorNotes] = useState<Record<string, boolean>>({});
+  const [aiSubstitutions, setAiSubstitutions] = useState<Record<string, Substitution[]>>({});
+  const [loadingAiSubs, setLoadingAiSubs] = useState<Record<string, boolean>>({});
+
+  const handleGetAiSubstitutions = async (flavor: Flavor) => {
+    if (!userSettings.geminiApiKey) return;
+    setLoadingAiSubs(prev => ({ ...prev, [flavor.id]: true }));
+    try {
+      const inventoryNames = inventory.map(i => i.name);
+      const suggestions = await getAiSubstitutions(
+        flavor.name, 
+        flavor.percentage, 
+        inventoryNames,
+        formData.name,
+        formData.flavors.map(f => ({ name: f.name, percentage: f.percentage })),
+        userSettings.geminiApiKey
+      );
+      
+      const mappedSuggestions: Substitution[] = suggestions.map(s => {
+        const invFlavor = inventory.find(i => i.name === s.name);
+        return {
+          flavor: invFlavor || { name: s.name },
+          multiplier: s.multiplier,
+          rationale: s.rationale
+        };
+      });
+      
+      setAiSubstitutions(prev => ({ ...prev, [flavor.id]: mappedSuggestions }));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoadingAiSubs(prev => ({ ...prev, [flavor.id]: false }));
+    }
+  };
+
   const isExistingRecipe = useMemo(() => {
     if (!recipe) return false;
     return recipes.some(r => r.id === recipe.id);
@@ -4760,12 +5323,25 @@ function RecipeEditor({
     const minPgMl = totalFlavorMl + (nicotineMl * (nicPgRatio / 100));
     const minVgMl = nicotineMl * (nicVgRatio / 100);
     
-    const minPgPercent = Math.ceil((minPgMl / formData.servingMl) * 100);
-    const minVgPercent = Math.ceil((minVgMl / formData.servingMl) * 100);
+    const minPgPercentRaw = (minPgMl / formData.servingMl) * 100;
+    const minVgPercentRaw = (minVgMl / formData.servingMl) * 100;
+
+    const minPgPercent = isNaN(minPgPercentRaw) || !isFinite(minPgPercentRaw) ? 0 : Math.ceil(minPgPercentRaw);
+    const minVgPercent = isNaN(minVgPercentRaw) || !isFinite(minVgPercentRaw) ? 0 : Math.ceil(minVgPercentRaw);
+    
+    const minPgValue = Math.min(100, minPgPercent);
+    const maxPgValue = Math.max(0, 100 - minVgPercent);
+    
+    if (minPgValue > maxPgValue) {
+      return {
+        minPg: 0,
+        maxPg: 100
+      };
+    }
     
     return {
-      minPg: Math.min(100, minPgPercent),
-      maxPg: Math.max(0, 100 - minVgPercent)
+      minPg: minPgValue,
+      maxPg: maxPgValue
     };
   }, [formData.flavors, formData.servingMl, formData.targetNicMg, formData.nicBaseMg, formData.nicBaseType, formData.nicBasePgRatio, flavourIntensity]);
 
@@ -4975,12 +5551,14 @@ function RecipeEditor({
       finalRecipeName = getNextVersionName(formData.name, recipes);
     }
 
+    const now = Date.now();
+
     if (isMixing) {
       const mixRecord: Mix = {
         id: Math.random().toString(36).substr(2, 9),
         recipeId: finalRecipeId,
         recipeName: finalRecipeName,
-        mixedAt: Date.now(),
+        mixedAt: now,
         totalVolume: results.totalMl,
         targetPgRatio: formData.targetPgRatio,
         targetNicMg: formData.targetNicMg,
@@ -5006,9 +5584,9 @@ function RecipeEditor({
         ...formData, 
         id: finalRecipeId, 
         name: finalRecipeName,
-        updatedAt: Date.now(),
-        lastMixedAt: isMixing ? Date.now() : (explicitlyNewVersion ? undefined : formData.lastMixedAt),
-        mixCount: explicitlyNewVersion ? (isMixing ? 1 : 0) : updatedMixCount
+        updatedAt: now,
+        lastMixedAt: now,
+        mixCount: explicitlyNewVersion ? 1 : updatedMixCount
       };
 
       // When saving AND mixing, we pass the mix record to onSave for better atomicity 
@@ -5019,7 +5597,7 @@ function RecipeEditor({
         ...formData, 
         id: finalRecipeId, 
         name: finalRecipeName,
-        updatedAt: Date.now(),
+        updatedAt: now,
         lastMixedAt: explicitlyNewVersion ? undefined : formData.lastMixedAt,
         mixCount: explicitlyNewVersion ? 0 : updatedMixCount
       };
@@ -5525,35 +6103,91 @@ function RecipeEditor({
                           )}
                         </div>
                         
-                        {!isInStock && substitutes.length > 0 && (
-                          <div className="mt-1 p-2 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900 space-y-1.5 text-left">
-                            <p className="text-[10px] font-medium text-amber-800 dark:text-amber-400 flex items-center gap-1">
-                              <Sparkles className="w-3 h-3" /> Similar flavors in stash:
-                            </p>
-                            <div className="flex flex-wrap gap-1.5">
-                              {substitutes.map((sub, sIdx) => (
+                        {!isInStock && (
+                          <div className="mt-1 p-2 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900 space-y-2 text-left">
+                            <div className="flex items-center justify-between gap-1">
+                              <p className="text-[10px] font-medium text-amber-800 dark:text-amber-400 flex items-center gap-1">
+                                <Search className="w-3 h-3" /> Potential Substitutes:
+                              </p>
+                              {userSettings.geminiApiKey && !aiSubstitutions[f.id] && (
                                 <Button
-                                  key={`${sub.flavor.name}-${sIdx}`}
-                                  variant="outline"
+                                  variant="ghost"
                                   size="sm"
-                                  className="h-6 text-[9px] bg-white border-amber-200 text-amber-700 hover:bg-amber-100 hover:border-amber-300 px-2 py-0"
-                                  onClick={() => {
-                                    const updates: Partial<Flavor> = {
-                                      name: sub.flavor.name,
-                                      costPerMl: sub.flavor.costPerMl,
-                                      isSubstitution: true,
-                                      originalName: f.originalName || f.name
-                                    };
-                                    if (sub.multiplier !== 1) {
-                                      updates.percentage = Number((f.percentage * sub.multiplier).toFixed(2));
-                                    }
-                                    updateFlavor(f.id, updates);
-                                  }}
+                                  disabled={loadingAiSubs[f.id]}
+                                  className="h-5 text-[9px] px-1.5 text-amber-600 hover:text-amber-700 hover:bg-amber-100"
+                                  onClick={() => handleGetAiSubstitutions(f)}
                                 >
-                                  Use {sub.flavor.name} {sub.multiplier !== 1 ? `(${sub.multiplier}x qty)` : ''}
+                                  {loadingAiSubs[f.id] ? (
+                                    <Loader2 className="w-2.5 h-2.5 animate-spin mr-1" />
+                                  ) : (
+                                    <Sparkles className="w-2.5 h-2.5 mr-1" />
+                                  )}
+                                  AI Find Match
                                 </Button>
-                              ))}
+                              )}
                             </div>
+
+                            {(() => {
+                              const aiSubs = aiSubstitutions[f.id] || [];
+                              const displaySubs = aiSubs.length > 0 ? aiSubs : substitutes;
+
+                              if (displaySubs.length === 0 && !loadingAiSubs[f.id]) {
+                                return <p className="text-[9px] text-amber-600/70 italic px-1">No similar {flavors()} found in stash.</p>;
+                              }
+
+                              if (loadingAiSubs[f.id]) {
+                                return (
+                                  <div className="flex items-center gap-2 text-[9px] text-amber-600 px-1 py-1">
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    Analyzing palette and intensities...
+                                  </div>
+                                );
+                              }
+
+                              return (
+                                <div className="space-y-1.5">
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {displaySubs.map((sub, sIdx) => {
+                                      const key = `${sub.flavor.id || sub.flavor.name}-${sIdx}`;
+                                      return (
+                                        <div key={key}>
+                                          <Tooltip>
+                                            <TooltipTrigger
+                                              className={cn(
+                                                buttonVariants({ variant: "outline", size: "sm" }),
+                                                "h-6 text-[9px] bg-white border-amber-200 text-amber-700 hover:bg-amber-100 hover:border-amber-300 px-2 py-0",
+                                                aiSubs.length > 0 ? "border-dashed border-amber-400 shadow-sm" : ""
+                                              )}
+                                              onClick={() => {
+                                                const updates: Partial<Flavor> = {
+                                                  name: sub.flavor.name,
+                                                  costPerMl: sub.flavor.costPerMl,
+                                                  isSubstitution: true,
+                                                  originalName: f.originalName || f.name,
+                                                  notes: sub.rationale || sub.notes
+                                                };
+                                                if (sub.multiplier !== 1) {
+                                                  updates.percentage = Number((f.percentage * sub.multiplier).toFixed(2));
+                                                }
+                                                updateFlavor(f.id, updates);
+                                              }}
+                                            >
+                                              {aiSubs.length > 0 && <Sparkles className="w-2 h-2 mr-1 text-amber-500" />}
+                                              Use {sub.flavor.name} {sub.multiplier !== 1 ? `(${sub.multiplier}x qty)` : ''}
+                                            </TooltipTrigger>
+                                            {sub.rationale && (
+                                              <TooltipContent className="max-w-[200px] text-[10px] p-2 bg-neutral-900 text-white border-neutral-800">
+                                                <p className="leading-relaxed">{sub.rationale}</p>
+                                              </TooltipContent>
+                                            )}
+                                          </Tooltip>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })()}
                           </div>
                         )}
                       </div>
@@ -6649,6 +7283,7 @@ function InventoryManager({
   const [volumeToAdd, setVolumeToAdd] = useState<string>('30');
   const [shoppingItemToRemove, setShoppingItemToRemove] = useState<ShoppingItem | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [isStashExporting, setIsStashExporting] = useState(false);
 
   // Pre-calculate normalized names for O(1) shopping list check
   const shoppingListNamesSet = useMemo(() => {
@@ -6796,7 +7431,7 @@ function InventoryManager({
           <CardTitle className="text-xl">{flavor(true)} Stash</CardTitle>
           <CardDescription>Manage your {flavor()} inventory and track missing ingredients.</CardDescription>
         </div>
-        <div className="flex items-center gap-2 w-full sm:w-auto">
+        <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
           <Button 
             variant="outline" 
             size="sm" 
@@ -6815,8 +7450,16 @@ function InventoryManager({
             <FileDown className="w-3.5 h-3.5" />
             ATF/ELR
           </Button>
+          <Button 
+            variant="outline" 
+            size="sm" 
+            className="h-9 gap-2 bg-white dark:bg-neutral-800 border-neutral-200 dark:border-neutral-700"
+            onClick={() => setIsStashExporting(true)}
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export
+          </Button>
           <Separator orientation="vertical" className="h-6 mx-1 hidden sm:block dark:bg-neutral-700" />
-          <Label htmlFor="sort" className="text-xs font-medium text-neutral-500 dark:text-neutral-400 whitespace-nowrap">Sort by:</Label>
           <Select value={sortBy} onValueChange={(v: any) => setSortBy(v)}>
             <SelectTrigger id="sort" className="w-full sm:w-[160px] h-9 bg-white dark:bg-neutral-800">
               <div className="flex items-center gap-2">
@@ -7258,6 +7901,12 @@ function InventoryManager({
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        <StashExportDialog 
+          open={isStashExporting} 
+          onOpenChange={setIsStashExporting} 
+          inventory={inventory} 
+        />
       </CardContent>
     </Card>
   );
@@ -7556,8 +8205,10 @@ function FlavorEditDialog({
   );
 }
 
-function AiLab({ 
+const AiLab = React.memo(function AiLab({ 
   inventory, 
+  orders,
+  shoppingList,
   suggestions, 
   onSuggest, 
   isLoading, 
@@ -7568,8 +8219,10 @@ function AiLab({
   isOnline
 }: { 
   inventory: string[], 
+  orders: Order[],
+  shoppingList: ShoppingItem[],
   suggestions: any[], 
-  onSuggest: (preferences?: string) => void, 
+  onSuggest: (preferences: string, allowOutOfStash: boolean) => void, 
   isLoading: boolean, 
   onUseRecipe: (r: any) => void,
   runtimeKey: string | null,
@@ -7579,6 +8232,7 @@ function AiLab({
 }) {
   const [manualKey, setManualKey] = useState(userSettings.geminiApiKey || '');
   const [preferences, setPreferences] = useState('');
+  const [allowOutOfStash, setAllowOutOfStash] = useState(true);
 
   const handleSaveManual = () => {
     if (manualKey.trim()) {
@@ -7662,26 +8316,44 @@ function AiLab({
                 The AI will analyze your {inventory.length} {flavors()} and create unique combinations with optimal percentages.
               </p>
               
-              <div className="w-full max-w-md mb-6 space-y-2 text-left">
-                <Label htmlFor="preferences" className="text-xs text-neutral-400 uppercase tracking-widest font-bold">
-                  {flavor(true)} Preferences (Optional)
-                </Label>
-                <Input 
-                  id="preferences"
-                  placeholder="e.g. Creamy dessert, fruity menthol, tobacco blend..."
-                  className="bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-600 h-10"
-                  value={preferences}
-                  onChange={(e) => setPreferences(e.target.value)}
-                />
+              <div className="w-full max-w-md mb-6 space-y-4 text-left">
+                <div className="space-y-2">
+                  <Label htmlFor="preferences" className="text-xs text-neutral-400 uppercase tracking-widest font-bold">
+                    {flavor(true)} Preferences (Optional)
+                  </Label>
+                  <Input 
+                    id="preferences"
+                    placeholder="e.g. Creamy dessert, fruity menthol, tobacco blend..."
+                    className="bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-600 h-10"
+                    value={preferences}
+                    onChange={(e) => setPreferences(e.target.value)}
+                  />
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <Checkbox 
+                    id="allow-out-of-stash" 
+                    checked={allowOutOfStash} 
+                    onCheckedChange={(checked) => setAllowOutOfStash(checked === true)}
+                    className="border-neutral-700 data-[state=checked]:bg-yellow-400 data-[state=checked]:text-black"
+                  />
+                  <Label 
+                    htmlFor="allow-out-of-stash" 
+                    className="text-xs text-neutral-300 font-medium cursor-pointer"
+                  >
+                    Allow AI to recommend missing {flavors()}
+                  </Label>
+                </div>
+
                 <p className="text-[10px] text-neutral-500 italic">
-                  * AI will still only use flavors you have in stock.
+                  * {allowOutOfStash ? `AI will prioritize your stash but may suggest key ${flavors()} you're missing.` : `AI will strictly only use ${flavors()} you have in stock.`}
                 </p>
               </div>
 
               <Button 
                 size="lg" 
                 className="bg-yellow-400 text-black hover:bg-yellow-500 font-bold px-8"
-                onClick={() => onSuggest(preferences)}
+                onClick={() => onSuggest(preferences, allowOutOfStash)}
                 disabled={isLoading || inventory.length < 2}
               >
                 {isLoading ? (
@@ -7711,15 +8383,22 @@ function AiLab({
                 <CardHeader className="p-4">
                   <div className="flex justify-between items-start">
                     <div className="space-y-1">
-                      <CardTitle className="text-lg">{suggestion.name}</CardTitle>
+                      <CardTitle className="text-lg">{suggestion.recipeName}</CardTitle>
                       <div className="flex gap-2 items-center flex-wrap">
                         <div className="flex-1 space-y-2">
                           <CardDescription className="text-neutral-600 dark:text-neutral-400">{suggestion.description}</CardDescription>
                           
+                          {/* Rationale */}
+                          {suggestion.rationale && (
+                            <p className="text-[11px] text-neutral-500 italic bg-neutral-50 dark:bg-neutral-900/50 p-2 rounded border border-neutral-100 dark:border-neutral-800">
+                              {suggestion.rationale}
+                            </p>
+                          )}
+
                           {/* Potency Warnings directly after description */}
-                          {suggestion.flavors.map((f: any) => getPotencyWarning(f.name, f.percentage)).filter(Boolean).length > 0 && (
+                          {suggestion.ingredients.map((f: any) => getPotencyWarning(f.name, f.percentage)).filter(Boolean).length > 0 && (
                             <div className="space-y-1.5 mt-2">
-                              {suggestion.flavors.map((f: any, idx: number) => {
+                              {suggestion.ingredients.map((f: any, idx: number) => {
                                 const warning = getPotencyWarning(f.name, f.percentage);
                                 if (!warning) return null;
                                 return (
@@ -7732,9 +8411,9 @@ function AiLab({
                             </div>
                           )}
                         </div>
-                        {suggestion.steepingDays > 0 && (
+                        {suggestion.steepTimeDays > 0 && (
                           <Badge variant="secondary" className="bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-100 dark:border-amber-800 flex items-center gap-1 text-[10px] shrink-0 self-start">
-                            <RefreshCw size={10} className="rotate-90" /> {suggestion.steepingDays}d steep
+                            <RefreshCw size={10} className="rotate-90" /> {suggestion.steepTimeDays}d steep
                           </Badge>
                         )}
                       </div>
@@ -7746,11 +8425,43 @@ function AiLab({
                 </CardHeader>
                 <CardContent className="p-4 pt-0">
                   <div className="flex flex-wrap gap-2">
-                    {suggestion.flavors.map((f: any, j: number) => (
-                      <Badge key={j} variant="secondary" className="bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300">
-                        {f.name}: {f.percentage}%
-                      </Badge>
-                    ))}
+                    {suggestion.ingredients.map((f: any, j: number) => {
+                      const normalizedName = normalizeFlavorName(f.name);
+                      const isInStash = inventory.some(item => normalizeFlavorName(item) === normalizedName);
+                      const isOnOrder = !isInStash && orders.some(o => 
+                        o.status !== 'received' && 
+                        o.items.some(item => normalizeFlavorName(item.name) === normalizedName)
+                      );
+                      const isOnShoppingList = !isInStash && !isOnOrder && shoppingList.some(item => 
+                        normalizeFlavorName(item.name) === normalizedName
+                      );
+                      
+                      let badgeClass = "bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-400";
+                      let Icon: any = null;
+
+                      if (isInStash) {
+                        badgeClass = "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border-green-100 dark:border-green-900";
+                        Icon = Check;
+                      } else if (isOnOrder) {
+                        badgeClass = "bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-400 border-purple-100 dark:border-purple-900";
+                        Icon = Truck;
+                      } else if (isOnShoppingList) {
+                        badgeClass = "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 border-blue-100 dark:border-blue-900";
+                        Icon = ShoppingCart;
+                      } else {
+                        badgeClass = "bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-400 border-red-100 dark:border-red-900";
+                        Icon = X;
+                      }
+
+                      return (
+                        <div key={j} className="flex flex-col gap-1">
+                          <Badge variant="secondary" className={`text-[10px] font-normal border ${badgeClass} inline-flex items-center gap-1 transition-opacity h-[20px]`}>
+                            {Icon && <Icon size={12} className="shrink-0" />}
+                            {f.name} ({f.percentage}%)
+                          </Badge>
+                        </div>
+                      );
+                    })}
                   </div>
                 </CardContent>
               </Card>
@@ -7760,7 +8471,7 @@ function AiLab({
       </div>
     </div>
   );
-}
+});
 
 function SettingsPanel({ 
   costs, 
@@ -7777,8 +8488,10 @@ function SettingsPanel({
   onExport,
   onImport,
   onDeleteAllData,
+  onResyncStats,
   onOpenPrivacy,
-  onOpenSafety
+  onOpenSafety,
+  onOpenTutorial
 }: { 
   costs: IngredientCost, 
   onUpdate: (c: IngredientCost) => void, 
@@ -7794,8 +8507,10 @@ function SettingsPanel({
   onExport: () => void,
   onImport: (file: File) => void,
   onDeleteAllData: () => Promise<void>,
+  onResyncStats: () => Promise<void>,
   onOpenPrivacy: () => void,
-  onOpenSafety: () => void
+  onOpenSafety: () => void,
+  onOpenTutorial: () => void
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -8157,6 +8872,20 @@ function SettingsPanel({
             </div>
           </div>
 
+          <div className="pt-2">
+            <Button 
+              variant="outline" 
+              className="w-full gap-2 border-amber-200 dark:border-amber-900/50 hover:bg-amber-50 dark:hover:bg-amber-950/20 text-amber-700 dark:text-amber-400"
+              onClick={onResyncStats}
+            >
+              <RefreshCw className="w-4 h-4" />
+              Re-sync Recipe Mix Stats
+            </Button>
+            <p className="text-[10px] text-neutral-400 mt-2 italic px-1">
+              Use this if your "Last Mixed" dates or "Mix Count" don't match your actual mix history. This will recalculate statistics for all recipes based on your recorded mixes.
+            </p>
+          </div>
+
           <Separator />
 
           <div className="space-y-3">
@@ -8239,11 +8968,26 @@ function SettingsPanel({
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <ShieldCheck className="w-5 h-5 text-blue-600" />
-            Legal & Safety
+            Help, Safety & Legal
           </CardTitle>
-          <CardDescription>Important information regarding your privacy and safety while using this application.</CardDescription>
+          <CardDescription>Useful guides, tutorials, and important safety and privacy policies.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <Button 
+            variant="outline" 
+            className="w-full justify-start gap-3 h-12 text-sm border-neutral-200 dark:border-neutral-800 hover:bg-blue-50 dark:hover:bg-blue-900/10 text-neutral-700 dark:text-neutral-300 transition-colors"
+            onClick={onOpenTutorial}
+          >
+            <div className="w-8 h-8 rounded-lg bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 shrink-0">
+              <Book className="w-4 h-4" />
+            </div>
+            <div className="text-left font-sans">
+              <p className="font-bold leading-tight">Interactive DIY Tutorial</p>
+              <p className="text-[10px] text-neutral-500 font-normal">A complete beginner's guide to mixing and app features.</p>
+            </div>
+            <ChevronRight className="w-4 h-4 ml-auto text-neutral-300" />
+          </Button>
+
           <Button 
             variant="outline" 
             className="w-full justify-start gap-3 h-12 text-sm border-neutral-200 dark:border-neutral-800 hover:bg-purple-50 dark:hover:bg-purple-900/10 text-neutral-700 dark:text-neutral-300 transition-colors"
@@ -8252,7 +8996,7 @@ function SettingsPanel({
             <div className="w-8 h-8 rounded-lg bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center text-purple-600 dark:text-purple-400 shrink-0">
               <FileText className="w-4 h-4" />
             </div>
-            <div className="text-left">
+            <div className="text-left font-sans">
               <p className="font-bold leading-tight">Privacy & Data Policy</p>
               <p className="text-[10px] text-neutral-500 font-normal">How we handle your personal data and account info.</p>
             </div>
@@ -8267,7 +9011,7 @@ function SettingsPanel({
             <div className="w-8 h-8 rounded-lg bg-red-100 dark:bg-red-900/30 flex items-center justify-center text-red-600 dark:text-red-400 shrink-0">
               <AlertTriangle className="w-4 h-4" />
             </div>
-            <div className="text-left">
+            <div className="text-left font-sans">
               <p className="font-bold leading-tight">Safety Warning & Disclaimer</p>
               <p className="text-[10px] text-neutral-500 font-normal">Known health risks and DIY mixing precautions.</p>
             </div>
@@ -8601,6 +9345,671 @@ function StashImportDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             {successCount !== null ? 'Done' : 'Cancel'}
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function StashExportDialog({ 
+  open, 
+  onOpenChange, 
+  inventory 
+}: { 
+  open: boolean, 
+  onOpenChange: (open: boolean) => void, 
+  inventory: InventoryFlavor[] 
+}) {
+  const [copied, setCopied] = useState(false);
+  
+  // Calculate stats
+  const totalFlavors = inventory.length;
+  const totalVolume = inventory.reduce((sum, item) => sum + (item.volumeMl || 0), 0);
+  const totalCost = inventory.reduce((sum, item) => {
+    if (item.volumeMl !== undefined && item.costPerMl !== undefined) {
+      return sum + (item.volumeMl * item.costPerMl);
+    }
+    return sum;
+  }, 0);
+
+  const downloadFile = (content: string, filename: string, contentType: string) => {
+    const blob = new Blob([content], { type: contentType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const exportToCSV = () => {
+    if (inventory.length === 0) {
+      toast.error("Your inventory is empty.");
+      return;
+    }
+    
+    // We export using the exact headers that StashImportDialog reads: name, volumeMl, notes, costPerMl
+    const headers = ['name', 'volumeMl', 'notes', 'costPerMl'];
+    
+    const csvRows = [
+      headers.join(','),
+      ...inventory.map(item => {
+        const nameEscaped = `"${(item.name || '').replace(/"/g, '""')}"`;
+        const volume = item.volumeMl !== undefined ? String(item.volumeMl) : '0';
+        const notesEscaped = `"${(item.notes || '').replace(/"/g, '""')}"`;
+        const cost = item.costPerMl !== undefined ? String(item.costPerMl) : '';
+        return [nameEscaped, volume, notesEscaped, cost].join(',');
+      })
+    ].join('\n');
+
+    downloadFile(
+      csvRows, 
+      `vapemix_stash_${new Date().toISOString().split('T')[0]}.csv`, 
+      'text/csv;charset=utf-8;'
+    );
+    toast.success("CSV file downloaded successfully!");
+  };
+
+  const generateTextFormat = () => {
+    let text = `My VapeMix Flavor Stash (${totalFlavors} flavors)\n`;
+    text += `Generated on ${new Date().toLocaleDateString()}\n`;
+    text += `Total Volume: ${totalVolume.toFixed(1)} ml\n`;
+    if (totalCost > 0) {
+      text += `Estimated Total Value: $${totalCost.toFixed(2)}\n`;
+    }
+    text += `========================================================\n\n`;
+    
+    inventory.forEach((item, index) => {
+      text += `${index + 1}. ${item.name}`;
+      const detailParts: string[] = [];
+      if (item.volumeMl !== undefined && item.volumeMl > 0) {
+        detailParts.push(`${item.volumeMl}ml`);
+      }
+      if (item.costPerMl !== undefined && item.costPerMl > 0) {
+        detailParts.push(`$${item.costPerMl.toFixed(2)}/ml`);
+      }
+      if (detailParts.length > 0) {
+        text += ` [${detailParts.join(' | ')}]`;
+      }
+      text += `\n`;
+      if (item.notes && item.notes.trim()) {
+        text += `   Notes: ${item.notes.trim()}\n`;
+      }
+      if (item.safetyWarnings && item.safetyWarnings.length > 0) {
+        text += `   Warnings: ${item.safetyWarnings.join(', ')}\n`;
+      }
+      text += `\n`;
+    });
+    
+    return text;
+  };
+
+  const downloadAsTextFile = () => {
+    if (inventory.length === 0) {
+      toast.error("Your inventory is empty.");
+      return;
+    }
+    const textContent = generateTextFormat();
+    downloadFile(
+      textContent,
+      `vapemix_stash_${new Date().toISOString().split('T')[0]}.txt`,
+      'text/plain;charset=utf-8;'
+    );
+    toast.success("Text file downloaded successfully!");
+  };
+
+  const handleCopyToClipboard = async () => {
+    if (inventory.length === 0) {
+      toast.error("Your inventory is empty.");
+      return;
+    }
+    try {
+      const textContent = generateTextFormat();
+      await navigator.clipboard.writeText(textContent);
+      setCopied(true);
+      toast.success("Stash text copied to clipboard!");
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy text:", err);
+      toast.error("Clipboard copy blocked. Please copy from the text box below.");
+    }
+  };
+
+  const previewText = inventory.length > 0 ? generateTextFormat().split('\n').slice(0, 15).join('\n') + "\n... (remaining items truncated in preview)" : "No items in stash.";
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[500px]">
+        <DialogHeader>
+          <DialogTitle>Export {flavor(true)} Stash</DialogTitle>
+          <DialogDescription>
+            Choose your preferred export format. CSV files can be imported back into VapeMix AI or opened in spreadsheet editors.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 py-3">
+          {/* Quick Summary Section */}
+          <div className="grid grid-cols-2 gap-2 bg-neutral-50 dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 rounded-lg p-3 text-xs">
+            <div>
+              <span className="text-neutral-400">Total Flavors:</span>
+              <p className="font-semibold text-neutral-800 dark:text-neutral-200 mt-0.5">{totalFlavors}</p>
+            </div>
+            <div>
+              <span className="text-neutral-400">Total Registered Volume:</span>
+              <p className="font-semibold text-neutral-800 dark:text-neutral-200 mt-0.5">{totalVolume.toFixed(1)} ml</p>
+            </div>
+          </div>
+
+          {/* Export Options */}
+          <div className="space-y-4">
+            {/* CSV Option */}
+            <div className="border border-neutral-100 dark:border-neutral-800 hover:border-neutral-200 dark:hover:border-neutral-700 rounded-lg p-3 transition duration-150 bg-white dark:bg-neutral-950/30">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 flex items-center gap-1.5">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    CSV Spreadsheet Format (.csv)
+                  </h4>
+                  <p className="text-[11px] text-neutral-400 leading-relaxed">
+                    A clean data spreadsheet of your entire stash. Fully compatible with ELR/ATF import standards and spreadsheet tools.
+                  </p>
+                </div>
+                <Button 
+                  size="sm" 
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white shrink-0 shadow-sm"
+                  onClick={exportToCSV}
+                  disabled={totalFlavors === 0}
+                >
+                  <Download className="w-3.5 h-3.5 mr-1" />
+                  CSV
+                </Button>
+              </div>
+            </div>
+
+            {/* Text Option */}
+            <div className="border border-neutral-100 dark:border-neutral-800 hover:border-neutral-200 dark:hover:border-neutral-700 rounded-lg p-3 transition duration-150 bg-white dark:bg-neutral-950/30 space-y-3">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 flex items-center gap-1.5">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500" />
+                    Plain Text List / Forum Share (.txt)
+                  </h4>
+                  <p className="text-[11px] text-neutral-400 leading-relaxed">
+                    Generate an elegant plain-text list of your stash, grouped with comments, costs and volumes. Perfect for posting and sharing.
+                  </p>
+                </div>
+                <div className="flex flex-col gap-1.5 shrink-0 animate-fade-in">
+                  <Button 
+                    size="sm" 
+                    variant="outline"
+                    className="border-neutral-200 dark:border-neutral-800 font-medium"
+                    onClick={handleCopyToClipboard}
+                    disabled={totalFlavors === 0}
+                  >
+                    {copied ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 mr-1 text-emerald-500 animate-scale-up" />
+                        Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5 mr-1" />
+                        Copy
+                      </>
+                    )}
+                  </Button>
+                  <Button 
+                    variant="ghost" 
+                    className="h-7 text-[10px] text-neutral-400 font-normal hover:text-neutral-600 dark:hover:text-neutral-200 self-center"
+                    onClick={downloadAsTextFile}
+                    disabled={totalFlavors === 0}
+                  >
+                    <Download className="w-2.5 h-2.5 mr-1" />
+                    As .txt file
+                  </Button>
+                </div>
+              </div>
+
+              {/* Text Preview Box */}
+              {totalFlavors > 0 && (
+                <div className="relative">
+                  <pre className="text-[9px] font-mono bg-neutral-50 dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 rounded p-2 text-neutral-500 max-h-[120px] overflow-y-auto select-all whitespace-pre-wrap">
+                    {previewText}
+                  </pre>
+                  <div className="absolute top-1 right-1 px-1 bg-neutral-200/50 dark:bg-neutral-800/50 rounded text-[8px] text-neutral-500 select-none uppercase tracking-widest font-bold">
+                    PREVIEW
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Close
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TutorialDialog({ open, onOpenChange }: { open: boolean, onOpenChange: (open: boolean) => void }) {
+  const [currentStep, setCurrentStep] = useState(0);
+
+  const steps = [
+    {
+      title: "Welcome to DIY Mixology! 🧪",
+      subtitle: "The art and science of creating your own premium e-liquids.",
+      content: (
+        <div className="space-y-4 font-sans">
+          <p className="text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed">
+            Welcome! Creating your own e-liquids is one of the most rewarding parts of vaping. Instead of buying commercial juices of unknown age and premium retail costs, you can select elite ingredients, craft exact flavors, and customize nicotine levels down to the decimal point.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
+            <div className="p-3 rounded-xl border border-blue-100 dark:border-blue-900 bg-blue-50/10 dark:bg-blue-950/10 space-y-1">
+              <h4 className="text-xs font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wide">🔌 Gemini AI Setup</h4>
+              <p className="text-[11px] text-neutral-500 leading-normal">
+                Connecting your own Gemini API key takes 30 seconds and unlocks advanced smart features, smart importers, and the AI Chemist.
+              </p>
+            </div>
+            <div className="p-3 rounded-xl border border-purple-100 dark:border-purple-900 bg-purple-50/10 dark:bg-purple-950/10 space-y-1">
+              <h4 className="text-xs font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wide">🎨 Custom Flavor Profiles</h4>
+              <p className="text-[11px] text-neutral-500 leading-normal">
+                Never settle for standard store profiles again. Tweak sweetness, cooling, and flavor density exactly to your tastebuds.
+              </p>
+            </div>
+            <div className="p-3 rounded-xl border border-red-100 dark:border-red-900 bg-red-50/10 dark:bg-red-950/10 space-y-1">
+              <h4 className="text-xs font-bold text-red-700 dark:text-red-400 uppercase tracking-wide">🔒 Purity Control</h4>
+              <p className="text-[11px] text-neutral-500 leading-normal">
+                Know exactly what goes into your vapor. Use only premium, USP-grade Propylene Glycol, Vegetable Glycerin, and lab flavorings.
+              </p>
+            </div>
+            <div className="p-3 rounded-xl border border-emerald-100 dark:border-emerald-900 bg-emerald-50/10 dark:bg-emerald-950/10 space-y-1">
+              <h4 className="text-xs font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">🤖 AI-Suggested Combos</h4>
+              <p className="text-[11px] text-neutral-500 leading-normal">
+                Stuck on what to mix? Use our integrated Gemini AI assistant to suggest recipes using your matching flavor stash.
+              </p>
+            </div>
+          </div>
+          <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900 text-amber-800 dark:text-amber-300 text-xs flex items-start gap-2 leading-relaxed font-sans">
+            <span className="text-sm">⚠️</span>
+            <div>
+              <span className="font-bold">DIY Caution:</span> Nicotine in pure concentrations is toxic. Always keep nicotine products, bottles, and utensils securely out of the reach of children and family pets.
+            </div>
+          </div>
+        </div>
+      )
+    },
+    {
+      title: "The Four Essential Ingredients 💧",
+      subtitle: "Learn how PG, VG, Nicotine, and Flavors work together.",
+      content: (
+        <div className="space-y-4 font-sans">
+          <p className="text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed">
+            All e-liquids consist of some combination of these four simple building blocks:
+          </p>
+          <div className="space-y-3">
+            <div className="flex items-start gap-3 p-2.5 rounded-lg hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors">
+              <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0 font-bold text-xs">PG</div>
+              <div>
+                <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200">Propylene Glycol (Thin, Throat Hit & Flavor Carrier)</h4>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-normal">
+                  PG is a very thin, odorless liquid. It carries throat sensations matching traditional cigarettes and is the ultimate carrier of flavor concentrates. Higher PG is perfect for discrete pod-vaping.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3 p-2.5 rounded-lg hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors">
+              <div className="w-8 h-8 rounded-full bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0 font-bold text-xs">VG</div>
+              <div>
+                <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200">Vegetable Glycerin (Thick, Smooth Vapor Clouds)</h4>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-normal">
+                  VG is thick, syrupy vegetable liquid. It produces thick, rich vapor clouds and makes the throat inhale feel incredibly smooth. Higher VG (e.g. 70%+ VG) is ideal for sub-ohm tank clouds.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3 p-2.5 rounded-lg hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors">
+              <div className="w-8 h-8 rounded-full bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0 font-bold text-xs">NIC</div>
+              <div>
+                <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200">Nicotine Base (The Satisfying Element)</h4>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-normal">
+                  Nicotine base is concentrated pure liquid nicotine diluted in PG or VG. Always keep your workspace neat, wear disposable nitrile gloves when handling bases, and clean spills immediately.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3 p-2.5 rounded-lg hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors">
+              <div className="w-8 h-8 rounded-full bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 flex items-center justify-center shrink-0 font-bold text-xs">FLV</div>
+              <div>
+                <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200">Flavor Concentrates (The Soul of the Vape)</h4>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-normal">
+                  Vape flavorings are water-soluble, ultra-concentrated artificial and natural flavor carriers. NEVER use oil-based flavorings of any kind (oil base causes severe lipid issues). Dilution percentages range from 0.5% up to 15%.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )
+    },
+    {
+      title: "Measuring Method: Scales vs. Syringes ⚖️",
+      subtitle: "Choosing the perfect technique for precision and easy cleanups.",
+      content: (
+        <div className="space-y-4 font-sans">
+          <p className="text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed">
+            There are two primary ways to measure ingredients. Your choice completely dictates your mixing workflow:
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-3.5 border-2 border-emerald-100 dark:border-emerald-950 rounded-xl bg-emerald-50/5 dark:bg-emerald-950/5 relative space-y-2">
+              <div className="absolute top-2.5 right-2.5 bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400 text-[9px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">Recommended</div>
+              <div className="flex items-center gap-2">
+                <Scale className="w-4 h-4 text-emerald-500" />
+                <h4 className="text-xs font-bold text-emerald-900 dark:text-emerald-300">Mixing by Weight (Scales)</h4>
+              </div>
+              <p className="text-[11px] text-neutral-500 leading-relaxed font-sans">
+                <span className="font-bold text-neutral-700 dark:text-neutral-300">How it works:</span> Use an inexpensive digital scale measuring down to <span className="font-bold">0.01g</span>. Put your empty bottle on the scale, press "Tare/Zero", and drip ingredients directly into the bottle by weight.
+              </p>
+              <ul className="list-disc list-inside text-[10px] text-neutral-400 font-sans space-y-0.5">
+                <li><span className="text-emerald-600 font-bold">Incredibly Clean</span>: No dirty syringes, cleanups, or cross-contamination.</li>
+                <li><span className="text-emerald-600 font-bold">Fast & Exact</span>: The app automatically scales volume to weight using specific density parameters.</li>
+              </ul>
+            </div>
+            <div className="p-3.5 border border-neutral-100 dark:border-neutral-800 rounded-xl bg-neutral-50/5 space-y-2">
+              <div className="flex items-center gap-2">
+                <Droplets className="w-4 h-4 text-blue-500" />
+                <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200">Mixing by Volume (Syringes)</h4>
+              </div>
+              <p className="text-[11px] text-neutral-500 leading-relaxed font-sans">
+                <span className="font-bold text-neutral-700 dark:text-neutral-300">How it works:</span> Draw exact volumes of PG, VG, nicotine base, and flavorings using graduated syringe sizes (e.g. 1ml, 5ml, and 10ml) and transfer them directly into the bottle.
+              </p>
+              <ul className="list-disc list-inside text-[10px] text-neutral-400 font-sans space-y-0.5">
+                <li><span className="text-blue-500 font-bold">Classic Method</span>: Good for testing tiny recipes without buying electronic scales first.</li>
+                <li><span className="text-red-500 font-bold">Cons</span>: Requires extensive syringe scrubbing and drying to avoid flavor pollution.</li>
+              </ul>
+            </div>
+          </div>
+          <div className="p-3 rounded-lg bg-blue-50/50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900 text-blue-800 dark:text-blue-300 text-xs font-sans">
+            <span className="font-bold">App Integration:</span> You can flip between <span className="font-bold">Grams (weight) targets</span> and <span className="font-bold">Milliliters (volume) targets</span> directly in our results table with one click, or establish your permanent default option under the <span className="font-bold">Settings tab</span>!
+          </div>
+        </div>
+      )
+    },
+    {
+      title: "Navigating VapeMix AI Features 📱",
+      subtitle: "A quick breakdown of how each tab serves your mixing process.",
+      content: (
+        <div className="space-y-4 font-sans">
+          <p className="text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed">
+            VapeMix AI is custom-built to support every step of your hobby. Here is what each tab offers:
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <div className="p-3 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-sm space-y-1">
+              <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 flex items-center gap-1.5 font-sans">
+                <Book className="w-3.5 h-3.5 text-neutral-400" /> Bookmarked Recipes
+              </h4>
+              <p className="text-[11px] text-neutral-500 leading-normal">
+                Your notebook of liquid profiles. Save formulas, view detailed breakdowns, attach ratings/reviews, and trace historical cloned revisions.
+              </p>
+            </div>
+            <div className="p-3 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-sm space-y-1">
+              <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 flex items-center gap-1.5 font-sans">
+                <FlaskConical className="w-3.5 h-3.5 text-neutral-400" /> Mix Calculator
+              </h4>
+              <p className="text-[11px] text-neutral-500 leading-normal font-sans">
+                Input target volume (ml), nicotine base strength, target PG/VG ratio and flavors. Output is shown in exact weight, volume, ratio, and precise costs.
+              </p>
+            </div>
+            <div className="p-3 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-sm space-y-1">
+              <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 flex items-center gap-1.5 font-sans">
+                <Package className="w-3.5 h-3.5 text-neutral-400" /> Flavor Stash (Inventory)
+              </h4>
+              <p className="text-[11px] text-neutral-500 leading-normal font-sans">
+                List the flavors currently sitting in your physical drawer. Track remaining volume, cost, and get alerted with amber warnings when stock is low.
+              </p>
+            </div>
+            <div className="p-3 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-sm space-y-1">
+              <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 flex items-center gap-1.5 font-sans">
+                <Sparkles className="w-3.5 h-3.5 text-neutral-400" /> Gemini AI Chemist
+              </h4>
+              <p className="text-[11px] text-neutral-500 leading-normal font-sans">
+                Analyze your custom Flavor Stash to receive customized recipes suggestions. Ask for flavor pairs, optimal percentages, and quick flavor substitutions.
+              </p>
+            </div>
+          </div>
+          <div className="p-3 bg-neutral-50 dark:bg-neutral-900/40 rounded-xl border border-neutral-200/50 dark:border-neutral-800 space-y-1.5">
+            <h5 className="text-[11px] font-bold text-neutral-700 dark:text-neutral-300">⚡ Supercharged Integration Feature: Record Mix & Save</h5>
+            <p className="text-[10px] text-neutral-500 leading-relaxed font-sans">
+              When finalizing a chemistry mix, tap the "Record Mix & Save" button! The app remembers the mix history, tracks metrics, and automatically decreases the exact flavoring milliliters from your inventory stash!
+            </p>
+          </div>
+        </div>
+      )
+    },
+    {
+      title: "Gemini Key, Importers & Orders 🔌",
+      subtitle: "Setup AI capabilities, import smart recipes, and manage inventory seamlessly.",
+      content: (
+        <div className="space-y-4 font-sans max-h-[350px] overflow-y-auto pr-1">
+          <p className="text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed font-sans">
+            Unleash the full power of VapeMix AI with our state-of-the-art automation:
+          </p>
+          <div className="space-y-3 font-sans">
+            <div className="p-3 rounded-xl border border-blue-100 dark:border-blue-950 bg-blue-50/5 dark:bg-blue-950/10 space-y-1">
+              <div className="flex items-center gap-1.5">
+                <Sparkles className="w-4 h-4 text-blue-500" />
+                <h4 className="text-xs font-bold text-blue-900 dark:text-blue-300">1. Setup Your Gemini API Key</h4>
+              </div>
+              <p className="text-[11px] text-neutral-500 leading-relaxed">
+                Go to the <span className="font-bold">Settings Tab</span> in the navigation panel. Click the Google AI Studio button to get a free API key in seconds, then paste it in to unlock AI-assisted recipe creation and import filters.
+              </p>
+            </div>
+            <div className="p-3 rounded-xl border border-purple-100 dark:border-purple-950 bg-purple-50/5 dark:bg-purple-950/10 space-y-1">
+              <div className="flex items-center gap-1.5">
+                <FileText className="w-4 h-4 text-purple-500" />
+                <h4 className="text-xs font-bold text-purple-900 dark:text-purple-300">2. Importing Recipes & Cash Invoices</h4>
+              </div>
+              <p className="text-[10px] text-neutral-500 leading-relaxed">
+                With your Gemini API key, you don't need manual copying:
+              </p>
+              <ul className="list-disc list-inside text-[10px] text-neutral-400 space-y-0.5 pl-1">
+                <li><span className="font-bold text-neutral-600 dark:text-neutral-300">Recipes:</span> Click <span className="font-bold">Import Recipe</span> under the Recipes tab to paste raw recipe blogs or text configurations.</li>
+                <li><span className="font-bold text-neutral-600 dark:text-neutral-300">Invoices:</span> Click <span className="font-bold">Import Invoice</span> under the Inventory tab and upload your flavor supplier order confirmations or PDFs.</li>
+              </ul>
+            </div>
+            <div className="p-3 rounded-xl border border-emerald-100 dark:border-emerald-950 bg-emerald-50/5 dark:bg-emerald-950/10 space-y-1">
+              <div className="flex items-center gap-1.5">
+                <Truck className="w-4 h-4 text-emerald-500" />
+                <h4 className="text-xs font-bold text-emerald-900 dark:text-emerald-300">3. Update Pending Orders to Received</h4>
+              </div>
+              <p className="text-[11px] text-neutral-500 leading-relaxed">
+                When you import invoices, the products are created as "Pending Orders" inside your Inventory sidebar. Once your packages arrive, click <span className="font-bold text-emerald-600 dark:text-emerald-400">Mark Received</span>. The app proportionally awards shipping metrics to each item, updates flavor costs, and immediately pumps your inventory stock levels!
+              </p>
+            </div>
+          </div>
+        </div>
+      )
+    },
+    {
+      title: "Step-by-Step: Making Your First Mix 🚀",
+      subtitle: "A simple walkthrough to get you cooking with complete confidence.",
+      content: (
+        <div className="space-y-4 font-sans">
+          <p className="text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed font-sans">
+            Follow this simple, step-by-step master plan to mix your inaugural batch of e-liquid:
+          </p>
+          <div className="space-y-3 font-sans h-[350px] overflow-y-auto pr-1">
+            <div className="flex gap-3">
+              <div className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">1</div>
+              <div>
+                <h5 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 font-sans">Prepare Inventory</h5>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-relaxed font-sans">
+                  Go to the <span className="font-bold">Inventory</span> tab and log three or four flavorings that you physically own (e.g. Capella Vanilla Custard, Flavorah Sweet Mango). Make sure to input their matching cost-per-bottle details.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 border-t border-neutral-100 dark:border-neutral-800/50 pt-2">
+              <div className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">2</div>
+              <div>
+                <h5 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 font-sans">Choose Your Formula</h5>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-relaxed font-sans">
+                  Head over to the <span className="font-bold">Mix Calculator</span> tab, or load a saved flavor recipe from the <span className="font-bold">Recipes</span> catalog.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 border-t border-neutral-100 dark:border-neutral-800/50 pt-2">
+              <div className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">3</div>
+              <div>
+                <h5 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 font-sans">Input Target Specifications</h5>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-relaxed font-sans">
+                  Input target metrics. For low-wattage pods, we recommend starting with a 15ml to 30ml batch of 50VG/50PG at 6-12mg Nicotine. For sub-ohm massive clouds, try a 60ml batch of 70VG/30PG and 3mg Nicotine. Spec your nicotine base.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 border-t border-neutral-100 dark:border-neutral-800/50 pt-2">
+              <div className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">4</div>
+              <div>
+                <h5 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 font-sans">Combine and Drip</h5>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-relaxed font-sans">
+                  Put on nitrile gloves. If measuring by weight: place your clean, empty bottle on the scale pan, press "Tare/Zero", and carefully drip nicotine base, flavorings, PG, and VG in grams to match the table. Zero the scale after each ingredient!
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 border-t border-neutral-100 dark:border-neutral-800/50 pt-2">
+              <div className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">5</div>
+              <div>
+                <h5 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 font-sans">Seal, Shake & Steep</h5>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-relaxed font-sans">
+                  Seal the bottle. Shake vigorously like a cocktail shaker for 60 seconds until cloudy. Fruits are generally delicious immediately ("Shake & Vape"). Bakeries, custards, and tobaccos form deeper, richer, sweet profiles if steeped (left in a cool, dark cupboard) for 1-3 weeks.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 border-t border-neutral-100 dark:border-neutral-800/50 pt-2 pb-1">
+              <div className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">✓</div>
+              <div>
+                <h5 className="text-xs font-bold text-emerald-800 dark:text-emerald-300 font-sans">Log and Decrease Stock</h5>
+                <p className="text-[11px] text-neutral-500 mt-0.5 leading-relaxed font-sans">
+                  Tap <span className="font-bold">Record Mix & Save</span>! The app records this batch in your mix history and automatically decrements flavor stocks!
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )
+    }
+  ];
+
+  const handleNext = () => {
+    if (currentStep < steps.length - 1) {
+      setCurrentStep(prev => prev + 1);
+    } else {
+      localStorage.setItem('vape-tutorial-viewed', 'true');
+      onOpenChange(false);
+    }
+  };
+
+  const handleBack = () => {
+    if (currentStep > 0) {
+      setCurrentStep(prev => prev - 1);
+    }
+  };
+
+  const handleClose = () => {
+    localStorage.setItem('vape-tutorial-viewed', 'true');
+    onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(val) => {
+      if (!val) handleClose();
+      else onOpenChange(val);
+    }}>
+      <DialogContent className="max-w-[90vw] sm:max-w-[550px] max-h-[90vh] flex flex-col p-6 overflow-hidden">
+        <DialogHeader className="pb-4 shrink-0 border-b border-neutral-100 dark:border-neutral-800 relative">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 select-none">
+              <Book className="w-5 h-5 animate-pulse" />
+            </div>
+            <div className="text-left">
+              <DialogTitle className="text-base sm:text-lg font-bold text-neutral-900 dark:text-neutral-100 font-sans">
+                {steps[currentStep].title}
+              </DialogTitle>
+              <DialogDescription className="text-xs text-neutral-500 mt-0.5 font-sans">
+                {steps[currentStep].subtitle}
+              </DialogDescription>
+            </div>
+          </div>
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            className="w-8 h-8 rounded-full p-0 absolute top-0 -right-2 text-neutral-400 hover:text-neutral-500 leading-none select-none" 
+            onClick={handleClose}
+          >
+            <X className="w-4 h-4" />
+          </Button>
+        </DialogHeader>
+
+        {/* Scrollable content container */}
+        <ScrollArea className="flex-1 overflow-y-auto py-4 font-sans text-neutral-800 dark:text-neutral-200">
+          {steps[currentStep].content}
+        </ScrollArea>
+
+        {/* Pagination & controls footer */}
+        <DialogFooter className="pt-4 shrink-0 border-t border-neutral-100 dark:border-neutral-800 flex flex-row items-center justify-between sm:justify-between w-full mt-auto">
+          {/* Dot navigation */}
+          <div className="flex items-center gap-1.5">
+            {steps.map((_, idx) => (
+              <button 
+                key={idx}
+                type="button"
+                aria-label={`Go to step ${idx + 1}`}
+                onClick={() => setCurrentStep(idx)}
+                className={cn(
+                  "w-2 h-2 rounded-full transition-all duration-300",
+                  idx === currentStep 
+                    ? "bg-blue-600 w-5 dark:bg-blue-500" 
+                    : "bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700"
+                )}
+              />
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {currentStep > 0 && (
+              <Button 
+                variant="outline" 
+                size="sm" 
+                className="h-8 font-medium text-xs rounded-lg font-sans" 
+                onClick={handleBack}
+              >
+                <ChevronLeft className="w-3.5 h-3.5 mr-1" />
+                Back
+              </Button>
+            )}
+            <Button 
+              size="sm" 
+              className={cn(
+                "h-8 font-bold text-xs rounded-lg shadow-sm shrink-0 font-sans",
+                currentStep === steps.length - 1 
+                  ? "bg-emerald-600 hover:bg-emerald-700 text-white" 
+                  : "bg-blue-600 hover:bg-blue-700 text-white"
+              )}
+              onClick={handleNext}
+            >
+              {currentStep === steps.length - 1 ? (
+                <>
+                  Get Mixing!
+                  <Check className="w-3.5 h-3.5 ml-1.5" />
+                </>
+              ) : (
+                <>
+                  Next
+                  <ChevronRight className="w-3.5 h-3.5 ml-1" />
+                </>
+              )}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

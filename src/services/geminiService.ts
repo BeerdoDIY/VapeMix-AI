@@ -2,6 +2,61 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 let cachedApiKey: string | null = null;
 
+/**
+ * Helper to call a Gemini API function with retries on transient errors.
+ * Retries on 429 (rate limits) and 503 (service unavailable / high demand).
+ */
+async function callWithRetry<T>(
+  apiCall: () => Promise<T>,
+  retries = 3,
+  delayMs = 1200
+): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await apiCall();
+    } catch (error: any) {
+      attempt++;
+      
+      const errorMessage = error?.message || "";
+      const errorStatus = error?.status || "";
+      const errorCode = error?.code || error?.status || "";
+      
+      let stringifiedError = "";
+      try {
+        stringifiedError = JSON.stringify(error);
+      } catch (e) {
+        stringifiedError = String(error);
+      }
+
+      const isTransient = 
+        errorMessage.includes("503") ||
+        errorMessage.includes("UNAVAILABLE") ||
+        errorMessage.includes("429") ||
+        errorMessage.includes("RESOURCE_EXHAUSTED") ||
+        errorMessage.includes("high demand") ||
+        errorMessage.includes("temporary") ||
+        stringifiedError.includes("503") ||
+        stringifiedError.includes("UNAVAILABLE") ||
+        stringifiedError.includes("429") ||
+        stringifiedError.includes("RESOURCE_EXHAUSTED") ||
+        stringifiedError.includes("high demand") ||
+        errorCode === 503 ||
+        errorCode === 429 ||
+        errorStatus === "UNAVAILABLE" ||
+        errorStatus === "RESOURCE_EXHAUSTED";
+
+      if (attempt >= retries || !isTransient) {
+        throw error;
+      }
+
+      console.warn(`[Gemini Service] Call failed (attempt ${attempt}/${retries}). Transient error detected. Retrying in ${delayMs}ms... Error:`, error);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      delayMs *= 2; // Exponential backoff
+    }
+  }
+}
+
 export function resetGeminiService() {
   cachedApiKey = null;
 }
@@ -52,7 +107,8 @@ export async function suggestRecipes(
   userApiKey?: string,
   customInstructions?: string,
   highRatedRecipes: FeedbackRecipe[] = [],
-  lowRatedRecipes: FeedbackRecipe[] = []
+  lowRatedRecipes: FeedbackRecipe[] = [],
+  allowOutOfStash: boolean = true
 ) {
   const isUS = typeof navigator !== 'undefined' && navigator.language === 'en-US';
   const flavorWord = isUS ? 'flavor' : 'flavour';
@@ -67,34 +123,43 @@ export async function suggestRecipes(
 
   const ai = new GoogleGenAI({ apiKey });
   
-  if (!availableFlavors.length) return [];
+  if (!availableFlavors.length && !allowOutOfStash) return [];
 
-  let prompt = `You are an expert e-liquid mixologist with deep knowledge of DIY ${flavorWord}ing concentrates and their typical usage percentages.
-  
-  I have the following e-liquid ${flavorsWord} available in my stash: ${availableFlavors.join(', ')}. 
-  Suggest 3 creative and delicious e-liquid recipes I can make using ONLY these ${flavorsWord}. 
-  For each recipe, provide a name, a brief description of the ${flavorWord} profile, a recommended steeping time in days, and the suggested percentage for each ingredient.
+  let prompt = `You are "The Master Mixologist," an expert e-liquid artisan with decades of experience in ${flavorWord} chemistry and profile balancing. Your goal is to create recipes that aren't just functional, but award-winning.
 
-  EXPERT MIXING GUIDELINES:
-  - Be realistic with percentages. Most recipes should have a total ${flavorWord} content between 8% and 20%.
-  - Recognize "Super Concentrates" and potent additives. For example:
-    * WS-23, Koolada, and Super Sweet (CAP) are usually used at 0.05% - 1.5%. NEVER suggest 3.5% WS-23; it would be unvapable and extremely harsh.
-    * Brands like Flavorah (FLV) and Medicine Flower usually require much lower percentages (0.1% - 1.5%) compared to TFA or Capella (3% - 8%).
-  - Differentiate between primary notes (highest %), bridge notes, and background accents (lowest %).
-  - If a ${flavorWord} is known to be very strong, use it sparingly as a background note.
-  - If a user explicitly asks for an unusually high percentage of a known potent ${flavorWord} (e.g. "5% WS-23"), follow the instruction but include a clear caution in the description field stating that this level is very high and may be unpleasant.
-  - steepingDays should be realistic (Fruits: 1-3 days, Creams/Custards: 7-14/21 days, Tobaccos: 14-30 days).
+### YOUR DESIGN PHILOSOPHY:
+1. **Bridge Notes:** You use specific ${flavorsWord} to bridge the gap between top and base notes (e.g., using a touch of Dragonfruit to make Strawberry pop).
+2. **Texture & Mouthfeel:** You consider how ingredients like Marshmallow, Meringue, or Ethyl Maltol affect the "thickness" of the vapor.
+3. **Chemical Realism:** You respect the "Total ${flavorWord.charAt(0).toUpperCase() + flavorWord.slice(1)} %" ceiling. Unless requested otherwise, keep total ${flavorWord} between 8-15% to avoid over-saturation and muting.
+4. **Steep Awareness:** You understand that creams and custards need time. You will advise the user on the optimal steep time.
 
-  INVENTIVENESS & LEARNING (CRITICAL):
-  - ANALYZE the provided HIGH-RATED recipes to understand the "User's Palate" (e.g., preference for complex bakeries, simple fruits, specific cooling levels).
-  - DO NOT just suggest similar recipes to high-rated ones; be INVENTIVE while respecting the palate.
-  - ANALYZE the provided LOW-RATED recipes (1-2 stars) to understand what the user DOES NOT like.
-  - AVOID combinations, flavor profiles, or specific high percentages that resulted in low ratings. Use this to learn "Off-Notes" the user is sensitive to.
+### MANDATORY USER PREFERENCE & PROFILE MANDATE (CRITICAL):
+- If the user specifies specific flavours, ingredients, fruits, or profiles in their prompt or preferences (for example, "watermelon, apple and peach"), **ALL OF THEM MUST BE INCLUDED AND FULLY REPRESENTED in EVERY single one of the 3 generated recipes.**
+- You must NOT omit or leave out any of the requested flavour elements. For example, if watermelon, apple, and peach are requested, every single result must contain ingredients representing watermelon, apple, and peach.
+- User-requested profiles are the absolute highest priority. Do NOT ignore or leave them out in favor of repeating old top-rated recipe formats.
 
-  PLEASE USE ${isUS ? 'US' : 'COMMONWEALTH'} SPELLING (e.g. use "${flavorWord}") appearing in your responses.`;
+### BALANCE WITH RATINGS (HIGH vs. LOW):
+- ANALYZE the provided HIGH-RATED recipes to understand the "User's Palate" (preferred overall intensity, sweetness, cream/custard preference or style), and LOW-RATED recipes to avoid what the user dislikes (like high sweetener%).
+- **DO NOT OVER-RELY ON PREVIOUS RECIPES:** Do NOT let previous recipes override or dilute the currently requested flavour profile. The user's active prompt is the definitive instruction. If the requested profile differs from previous ratings, prioritize the new profile completely.
+
+### TECHNICAL CONSTRAINTS:
+- You will be provided with a [USER_STASH] (JSON array of available ${flavorsWord}). 
+- You MUST prioritize ${flavorsWord} found in the [USER_STASH]: ${availableFlavors.join(', ')}.
+- ${allowOutOfStash ? 'If a recipe requires a "crucial" ' + flavorWord + ' not in the stash, suggest it as a "Recommended Addition" and mark it as "inStash: false".' : 'You MUST ONLY use ' + flavorsWord + ' that are in the [USER_STASH]. Do NOT suggest any ' + flavorsWord + ' the user does not have.'}
+- RECOGNIZE potent additives: WS-23, Koolada, and Super Sweet (CAP) are usually used at 0.05% - 1.5%.
+- ALWAYS output exactly 3 recipes in a strictly valid JSON format matching the requested schema.
+- PLEASE USE COMMONWEALTH SPELLING (e.g. use "${flavorWord}") appearing in your responses.
+
+### THE PROCESS (Chain of Thought):
+Before providing the JSON, internally evaluate the requested profile. Ask: "Did I include EVERY single flavour, fruit, or ingredient the user requested in their active prompt? How do I make them balance perfectly?" Then, generate the output.
+
+INVENTIVENESS & EXPLORATION:
+- **DIVERSITY & INNOVATION:** Do not just repeat existing high-rated patterns. Encourage trying something new from their stash.
+- **UNEXPLORED FLAVOURS:** Look for flavours in the [USER_STASH] that appear in fewer of the high-rated recipes and try to feature them in a balanced, expert way.
+- **VARIED SUGGESTIONS:** When providing 3 recipes, ensure they represent different profiles (e.g. one "Safe" refinement, one "Adventurous" shift, and one "Complex" exploration).`;
 
   if (highRatedRecipes && highRatedRecipes.length > 0) {
-    prompt += `\n\nUSER'S TOP-RATED RECIPES (LEARN FROM THESE):\n`;
+    prompt += `\n\nUSER'S TOP-RATED RECIPES (LEARN FROM THIS STYLE AND PALATE, BUT DO NOT DILUTE THE ACTIVE USER PREFERENCE WITH THESE):\n`;
     highRatedRecipes.forEach(r => {
       const flavors = r.flavors.map(f => `${f.name} (${f.percentage}%)`).join(', ');
       prompt += `- ${r.name} (Rating: ${r.rating}/5): ${flavors}. Notes: ${r.description || 'None'}\n`;
@@ -102,7 +167,7 @@ export async function suggestRecipes(
   }
 
   if (lowRatedRecipes && lowRatedRecipes.length > 0) {
-    prompt += `\n\nUSER'S LOW-RATED RECIPES (AVOID THESE PATTERNS):\n`;
+    prompt += `\n\nUSER'S LOW-RATED RECIPES (AVOID THESE STYLES OR INGREDIENT RATIOS):\n`;
     lowRatedRecipes.forEach(r => {
       const flavors = r.flavors.map(f => `${f.name} (${f.percentage}%)`).join(', ');
       prompt += `- ${r.name} (Rating: ${r.rating}/5): ${flavors}. Notes: ${r.description || 'None'}\n`;
@@ -110,7 +175,7 @@ export async function suggestRecipes(
   }
 
   if (preferences && preferences.trim()) {
-    prompt += `\n\nUser Preferences: ${preferences.trim()}\nPlease try to follow these preferences while still ONLY using the available flavors listed above.`;
+    prompt += `\n\nUser Preferences & Active Request: ${preferences.trim()}\nIMPORTANT: EVERY single one of the 3 generated recipes MUST completely satisfy these active preferences and include all requested flavor components. Do not let previous high/low recipes distract from these.`;
   }
 
   if (customInstructions && customInstructions.trim()) {
@@ -118,8 +183,8 @@ export async function suggestRecipes(
   }
 
   try {
-    const result = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+    const result = await callWithRetry(() => ai.models.generateContent({
+      model: "gemini-3.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -128,26 +193,28 @@ export async function suggestRecipes(
           items: {
             type: Type.OBJECT,
             properties: {
-              name: { type: Type.STRING },
+              recipeName: { type: Type.STRING },
               description: { type: Type.STRING },
-              steepingDays: { type: Type.NUMBER },
-              flavors: {
+              steepTimeDays: { type: Type.NUMBER },
+              rationale: { type: Type.STRING },
+              ingredients: {
                 type: Type.ARRAY,
                 items: {
                   type: Type.OBJECT,
                   properties: {
                     name: { type: Type.STRING },
-                    percentage: { type: Type.NUMBER }
+                    percentage: { type: Type.NUMBER },
+                    inStash: { type: Type.BOOLEAN }
                   },
-                  required: ["name", "percentage"]
+                  required: ["name", "percentage", "inStash"]
                 }
               }
             },
-            required: ["name", "description", "flavors", "steepingDays"]
+            required: ["recipeName", "description", "ingredients", "steepTimeDays", "rationale"]
           }
         }
       }
-    });
+    }));
 
     const text = result.text;
     if (!text) {
@@ -162,7 +229,11 @@ export async function suggestRecipes(
   }
 }
 
-export async function parseImportedRecipe(content: string, userApiKey?: string) {
+export async function parseImportedRecipe(
+  content: string, 
+  userApiKey?: string, 
+  defaults?: { servingMl?: number, targetNicMg?: number, targetPgRatio?: number }
+) {
   const apiKey = await getApiKey(userApiKey);
   
   if (!apiKey || apiKey === "undefined" || apiKey === "" || apiKey.length < 10) {
@@ -198,7 +269,10 @@ export async function parseImportedRecipe(content: string, userApiKey?: string) 
   
   CRITICAL: If you cannot find a clear e-liquid recipe in the content (no ${flavorWord} list or percentages), set "recipeFound" to false. If you find a recipe, set it to true.
   
-  If some values are missing but a recipe is clearly present, use sensible defaults (e.g., 60ml, 3mg nic, 30/70 PG/VG).
+  If some values are missing but a recipe is clearly present, use these defaults:
+  - Volume: ${defaults?.servingMl || 60}ml
+  - Nicotine: ${defaults?.targetNicMg || 3}mg
+  - PG/VG Ratio: ${defaults?.targetPgRatio || 30}/${100 - (defaults?.targetPgRatio || 30)} (So targetPgRatio = ${defaults?.targetPgRatio || 30})
   
   CRITICAL NAMING CONVENTION:
   Ensure ${flavorWord} names follow the format "${flavorWord.charAt(0).toUpperCase() + flavorWord.slice(1)} Name (Manufacturer Abbreviation)". 
@@ -216,8 +290,8 @@ export async function parseImportedRecipe(content: string, userApiKey?: string) 
   ${content.substring(0, 15000)} // Truncate to avoid token limits if it's a huge HTML`;
 
   try {
-    const result = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+    const result = await callWithRetry(() => ai.models.generateContent({
+      model: "gemini-3.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -251,7 +325,7 @@ export async function parseImportedRecipe(content: string, userApiKey?: string) 
           required: ["recipeFound", "name", "flavors"]
         }
       }
-    });
+    }));
 
     const text = result.text;
     if (!text) throw new Error("Gemini returned empty text");
@@ -310,8 +384,8 @@ export async function parseInvoice(content: string, userApiKey?: string) {
   ${content.substring(0, 15000)}`;
 
   try {
-    const result = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+    const result = await callWithRetry(() => ai.models.generateContent({
+      model: "gemini-3.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -342,7 +416,7 @@ export async function parseInvoice(content: string, userApiKey?: string) {
           required: ["items", "shippingCost", "vendor", "orderNumber"]
         }
       }
-    });
+    }));
 
     const text = result.text;
     if (!text) throw new Error("Gemini returned empty text");
@@ -350,5 +424,81 @@ export async function parseInvoice(content: string, userApiKey?: string) {
   } catch (error: any) {
     console.error("Error parsing invoice:", error);
     throw error;
+  }
+}
+
+export interface SubstitutionSuggestion {
+  name: string;
+  multiplier: number;
+  rationale: string;
+}
+
+export async function getAiSubstitutions(
+  targetFlavor: string,
+  targetPercentage: number,
+  inventory: string[],
+  recipeName?: string,
+  allRecipeFlavors?: { name: string, percentage: number }[],
+  userApiKey?: string
+): Promise<SubstitutionSuggestion[]> {
+  const apiKey = await getApiKey(userApiKey);
+  if (!apiKey || apiKey.length < 10) return [];
+
+  const isUS = typeof navigator !== 'undefined' && navigator.language === 'en-US';
+  const flavorWord = isUS ? 'flavor' : 'flavour';
+  const flavorsWord = isUS ? 'flavors' : 'flavours';
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  let prompt = `You are "The Master Mixologist," an expert e-liquid artisan. 
+  I need to find the best substitute for a missing ${flavorWord} in a recipe.
+  
+  MISSING ${flavorWord.toUpperCase()}: ${targetFlavor}
+  INTENDED PERCENTAGE: ${targetPercentage}%
+  ${recipeName ? `RECIPE NAME: ${recipeName}` : ''}
+  ${allRecipeFlavors ? `OTHER ${flavorsWord.toUpperCase()} IN RECIPE: ${allRecipeFlavors.map(f => `${f.name} (${f.percentage}%)`).join(', ')}` : ''}
+  
+  [USER_STASH]: ${inventory.join(', ')}
+  
+  YOUR TASK:
+  1. Analyze the profile of the missing ${flavorWord}.
+  2. Search the [USER_STASH] for the closest possible matches in terms of profile (e.g., if "Strawberry (TFA)" is missing, "Strawberry (CAP)" or "Shisha Strawberry (INW)" might work).
+  3. For each suggestion, provide a "multiplier" to adjust the percentage. Some ${flavorsWord} are much more concentrated than others (e.g., FlavourArt is usually stronger than TFA).
+  4. Provide a brief rationale for why this is a good substitute.
+  
+  RULES:
+  - ONLY suggest ${flavorsWord} that are in the [USER_STASH].
+  - Suggest a maximum of 3 options.
+  - Return the results in a strictly valid JSON format.
+  - If NO good substitutes exist in the stash, return an empty array. Avoid suggesting things that are "worlds apart" (e.g., don't suggest a butter for a pineapple).
+  `;
+
+  try {
+    const result = await callWithRetry(() => ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              name: { type: Type.STRING },
+              multiplier: { type: Type.NUMBER },
+              rationale: { type: Type.STRING }
+            },
+            required: ["name", "multiplier", "rationale"]
+          }
+        }
+      }
+    }));
+
+    const text = result.text;
+    if (!text) return [];
+    return JSON.parse(text);
+  } catch (error) {
+    console.error("Error getting AI substitutions:", error);
+    return [];
   }
 }
