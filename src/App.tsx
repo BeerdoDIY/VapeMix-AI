@@ -564,7 +564,9 @@ const RECIPE_SORT_OPTIONS: Record<string, string> = {
 
 const INVENTORY_SORT_OPTIONS: Record<string, string> = {
   name: 'Alphabetical',
-  manufacturer: 'Manufacturer'
+  manufacturer: 'Manufacturer',
+  volumeAsc: 'Volume (Lowest First)',
+  volumeDesc: 'Volume (Highest First)'
 };
 
 const SOURCE_OPTIONS: Record<string, string> = {
@@ -740,7 +742,13 @@ function AppContent() {
   }, [activeTab]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
-  const [sortBy, setSortBy] = useState('newest');
+  const [sortBy, setSortBy] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('vape-recipe-sort-by');
+      if (saved) return saved;
+    }
+    return 'newest';
+  });
   const [showOnlyAvailable, setShowOnlyAvailable] = useState(false);
   const [editingRecipe, setEditingRecipe] = useState<Recipe | null>(null);
   const [editingItem, setEditingItem] = useState<InventoryFlavor | null>(null);
@@ -828,7 +836,7 @@ function AppContent() {
   }, [activeTab, cookieConsent]);
 
   // Version
-  const VERSION = "1.32.13";
+  const VERSION = "1.32.15";
 
   // History Navigation Support
   useEffect(() => {
@@ -1166,6 +1174,12 @@ function AppContent() {
     return () => clearTimeout(timer);
   }, [mixes, isAuthReady]);
 
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('vape-recipe-sort-by', sortBy);
+    }
+  }, [sortBy]);
+
   // Firestore Syncing
   useEffect(() => {
     if (!isAuthReady) return;
@@ -1189,7 +1203,9 @@ function AppContent() {
           const isGuest = localR.uid === 'anonymous' || !localR.uid;
           
           if (!cloudR) {
-            merged.push(localR);
+            if (isGuest) {
+              merged.push(localR);
+            }
           } else {
             const localTime = localR.updatedAt || localR.createdAt || 0;
             const cloudTime = cloudR.updatedAt || cloudR.createdAt || 0;
@@ -1216,7 +1232,9 @@ function AppContent() {
           const isGuest = localI.uid === 'anonymous' || !localI.uid;
           
           if (!cloudI) {
-            merged.push(localI);
+            if (isGuest) {
+              merged.push(localI);
+            }
           } else {
             const localTime = localI.updatedAt || 0;
             const cloudTime = cloudI.updatedAt || 0;
@@ -1243,7 +1261,9 @@ function AppContent() {
           const isGuest = localS.uid === 'anonymous' || !localS.uid;
           
           if (!cloudS) {
-            merged.push(localS);
+            if (isGuest) {
+              merged.push(localS);
+            }
           } else {
             const localTime = localS.addedAt || 0;
             const cloudTime = cloudS.addedAt || 0;
@@ -1286,7 +1306,9 @@ function AppContent() {
           const isGuest = localM.uid === 'anonymous' || !localM.uid;
           
           if (!cloudM) {
-            merged.push(localM);
+            if (isGuest) {
+              merged.push(localM);
+            }
           } else {
             const localTime = localM.mixedAt || 0;
             const cloudTime = cloudM.mixedAt || 0;
@@ -1313,7 +1335,9 @@ function AppContent() {
           const isGuest = localO.uid === 'anonymous' || !localO.uid;
           
           if (!cloudO) {
-            merged.push(localO);
+            if (isGuest) {
+              merged.push(localO);
+            }
           } else {
             const localTime = Math.max(localO.createdAt || 0, localO.receivedAt || 0);
             const cloudTime = Math.max(cloudO.createdAt || 0, cloudO.receivedAt || 0);
@@ -1820,9 +1844,8 @@ function AppContent() {
         } catch (err) {
           handleFirestoreError(err, OperationType.DELETE, `users/${uid}/recipes/${recipeToDelete.id}`);
         }
-      } else {
-        setRecipes(recipes.filter(r => r.id !== recipeToDelete.id));
       }
+      setRecipes(recipes.filter(r => r.id !== recipeToDelete.id));
       setRecipeToDelete(null);
     }
   };
@@ -4225,6 +4248,22 @@ function DuplicateInventoryDialog({
 }
 
 const VERSION_HISTORY = [
+  {
+    version: "1.32.15",
+    date: "July 1, 2026",
+    changes: [
+      "Inventory Stash: Added sorting options for flavoring volume (Lowest First and Highest First), placing items with unknown or unrecorded volumes at the bottom of the sorted list.",
+      "Persistence: Integrated LocalStorage caching to automatically persist and restore your recipe and inventory stash sorting preferences between browser sessions."
+    ]
+  },
+  {
+    version: "1.32.14",
+    date: "June 15, 2026",
+    changes: [
+      "Recipe Library: Fixed a bug where deleting a saved recipe through the confirmation prompt failed to correctly clear it from real-time local state and cloud streams.",
+      "App Tutorial: Updated the user guide wizards to correctly match 'Record Mix & Save' labeling, and added full step-by-step instructions for Gemini API setup, smart recipe and invoice importing, and updating pending orders to active inventory stocks."
+    ]
+  },
   {
     version: "1.32.13",
     date: "June 1, 2026",
@@ -7264,7 +7303,19 @@ function InventoryManager({
 }) {
   const [inventorySearchQuery, setInventorySearchQuery] = useState('');
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'name' | 'manufacturer'>('name');
+  const [sortBy, setSortBy] = useState<'name' | 'manufacturer' | 'volumeAsc' | 'volumeDesc'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('vape-inventory-sort-by');
+      if (saved && ['name', 'manufacturer', 'volumeAsc', 'volumeDesc'].includes(saved)) {
+        return saved as any;
+      }
+    }
+    return 'name';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('vape-inventory-sort-by', sortBy);
+  }, [sortBy]);
 
   // Debounce search query to avoid lag in large inventories
   useEffect(() => {
@@ -7338,6 +7389,24 @@ function InventoryManager({
         const ma = getManufacturer(a.name);
         const mb = getManufacturer(b.name);
         if (ma !== mb) return ma.localeCompare(mb);
+      } else if (sortBy === 'volumeAsc') {
+        const isKnownA = a.volumeMl !== undefined && a.volumeMl !== null;
+        const isKnownB = b.volumeMl !== undefined && b.volumeMl !== null;
+        if (!isKnownA && !isKnownB) return a.name.localeCompare(b.name);
+        if (!isKnownA) return 1;
+        if (!isKnownB) return -1;
+        if (a.volumeMl !== b.volumeMl) {
+          return (a.volumeMl ?? 0) - (b.volumeMl ?? 0);
+        }
+      } else if (sortBy === 'volumeDesc') {
+        const isKnownA = a.volumeMl !== undefined && a.volumeMl !== null;
+        const isKnownB = b.volumeMl !== undefined && b.volumeMl !== null;
+        if (!isKnownA && !isKnownB) return a.name.localeCompare(b.name);
+        if (!isKnownA) return 1;
+        if (!isKnownB) return -1;
+        if (a.volumeMl !== b.volumeMl) {
+          return (b.volumeMl ?? 0) - (a.volumeMl ?? 0);
+        }
       }
       return a.name.localeCompare(b.name);
     });
@@ -7472,6 +7541,8 @@ function InventoryManager({
             <SelectContent>
               <SelectItem value="name">Alphabetical</SelectItem>
               <SelectItem value="manufacturer">Manufacturer</SelectItem>
+              <SelectItem value="volumeAsc">Volume (Lowest First)</SelectItem>
+              <SelectItem value="volumeDesc">Volume (Highest First)</SelectItem>
             </SelectContent>
           </Select>
         </div>
