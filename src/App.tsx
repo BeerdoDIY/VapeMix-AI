@@ -5298,7 +5298,6 @@ function RecipeEditor({
   const [loadingAiSubs, setLoadingAiSubs] = useState<Record<string, boolean>>({});
 
   const handleGetAiSubstitutions = async (flavor: Flavor) => {
-    if (!userSettings.geminiApiKey) return;
     setLoadingAiSubs(prev => ({ ...prev, [flavor.id]: true }));
     try {
       const inventoryNames = inventory.map(i => i.name);
@@ -6148,7 +6147,7 @@ function RecipeEditor({
                               <p className="text-[10px] font-medium text-amber-800 dark:text-amber-400 flex items-center gap-1">
                                 <Search className="w-3 h-3" /> Potential Substitutes:
                               </p>
-                              {userSettings.geminiApiKey && !aiSubstitutions[f.id] && (
+                              {!aiSubstitutions[f.id] && (
                                 <Button
                                   variant="ghost"
                                   size="sm"
