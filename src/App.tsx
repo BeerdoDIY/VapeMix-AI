@@ -836,7 +836,7 @@ function AppContent() {
   }, [activeTab, cookieConsent]);
 
   // Version
-  const VERSION = "1.32.15";
+  const VERSION = "1.32.16";
 
   // History Navigation Support
   useEffect(() => {
@@ -4248,6 +4248,15 @@ function DuplicateInventoryDialog({
 }
 
 const VERSION_HISTORY = [
+  {
+    version: "1.32.16",
+    date: "July 9, 2026",
+    changes: [
+      "AI Flavor Lab: Integrated a robust multi-model failover pipeline (with gemini-2.5-flash as the primary engine) to transparently handle API quota/rate limit errors and maintain uninterrupted functionality.",
+      "AI Substitution Optimization: Greatly optimized the speed of AI flavor substitutions on the Mix tab using a combined semantic and lexical pre-filtering engine, limiting the search index to relevant matches before LLM processing.",
+      "Substitutions Access: Allowed all users to access AI flavor suggestions directly from the backend server key fallback if a personal custom API key is not configured."
+    ]
+  },
   {
     version: "1.32.15",
     date: "July 1, 2026",

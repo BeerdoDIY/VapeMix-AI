@@ -13,18 +13,22 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * Helper to call a Gemini API function with retries on transient errors.
- * Retries on 429 (rate limits) and 503 (service unavailable / high demand).
+ * Helper to call a Gemini API function with retries on transient errors and automatic model fallback.
+ * Automatically fails over to alternate models if a rate limit (429) or high demand error is encountered.
  */
 async function callWithRetry<T>(
-  apiCall: () => Promise<T>,
+  apiCall: (model: string) => Promise<T>,
+  models: string[] = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-3.5-flash"],
   retries = 3,
   delayMs = 1200
 ): Promise<T> {
   let attempt = 0;
+  let modelIndex = 0;
+
   while (true) {
+    const currentModel = models[modelIndex];
     try {
-      return await apiCall();
+      return await apiCall(currentModel);
     } catch (error: any) {
       attempt++;
       const errorMessage = error?.message || "";
@@ -38,36 +42,133 @@ async function callWithRetry<T>(
         stringifiedError = String(error);
       }
 
-      const isTransient = 
-        errorMessage.includes("503") ||
-        errorMessage.includes("UNAVAILABLE") ||
+      const isQuotaOrLimit = 
         errorMessage.includes("429") ||
         errorMessage.includes("RESOURCE_EXHAUSTED") ||
         errorMessage.includes("high demand") ||
-        errorMessage.includes("temporary") ||
-        stringifiedError.includes("503") ||
-        stringifiedError.includes("UNAVAILABLE") ||
         stringifiedError.includes("429") ||
         stringifiedError.includes("RESOURCE_EXHAUSTED") ||
         stringifiedError.includes("high demand") ||
-        errorCode === 503 ||
         errorCode === 429 ||
-        errorStatus === "UNAVAILABLE" ||
         errorStatus === "RESOURCE_EXHAUSTED";
+
+      const isTransient = 
+        isQuotaOrLimit ||
+        errorMessage.includes("503") ||
+        errorMessage.includes("UNAVAILABLE") ||
+        errorMessage.includes("temporary") ||
+        stringifiedError.includes("503") ||
+        stringifiedError.includes("UNAVAILABLE") ||
+        errorCode === 503 ||
+        errorStatus === "UNAVAILABLE";
+
+      // If we hit a quota or limit, and we have more fallback models, failover immediately
+      if (isQuotaOrLimit && modelIndex < models.length - 1) {
+        modelIndex++;
+        const nextModel = models[modelIndex];
+        console.warn(`[Server Gemini] Model ${currentModel} hit quota/rate limit. Falling back immediately to ${nextModel}...`);
+        attempt = 0; // Reset attempts for the new model
+        continue;
+      }
 
       if (attempt >= retries || !isTransient) {
         throw error;
       }
 
-      console.warn(`[Server Gemini] Call failed (attempt ${attempt}/${retries}). Transient error detected. Retrying in ${delayMs}ms... Error:`, error);
+      console.warn(`[Server Gemini] Call failed with model ${currentModel} (attempt ${attempt}/${retries}). Retrying in ${delayMs}ms... Error:`, error);
       await new Promise(resolve => setTimeout(resolve, delayMs));
       delayMs *= 2; // Exponential backoff
     }
   }
 }
 
+interface RateLimitRecord {
+  timestamps: number[];
+}
+
+const rateLimitDb = new Map<string, RateLimitRecord>();
+
+/**
+ * Checks if a user has exceeded their hourly rate limit (10 requests per hour).
+ * - bboase@gmail.com is ALWAYS exempt.
+ * - Any user who provides their own custom API key is exempt.
+ * - Everyone else using the server's shared key is limited to 10 requests per hour.
+ */
+function checkRateLimit(req: express.Request): { allowed: boolean; errorMsg?: string } {
+  const userApiKey = req.headers["x-gemini-api-key"] as string || "";
+  if (userApiKey && userApiKey.trim().length >= 10) {
+    // Exempt: Using their own key
+    return { allowed: true };
+  }
+
+  const userEmail = req.headers["x-user-email"] as string || "";
+  const normalizedEmail = userEmail.trim().toLowerCase();
+
+  if (normalizedEmail === "bboase@gmail.com") {
+    // Exempt: Owner
+    return { allowed: true };
+  }
+
+  // Identify guest / other user by email or IP address
+  const xForwardedFor = req.headers["x-forwarded-for"];
+  let clientIp = "";
+  if (typeof xForwardedFor === "string") {
+    clientIp = xForwardedFor.split(",")[0].trim();
+  } else if (Array.isArray(xForwardedFor) && xForwardedFor.length > 0) {
+    clientIp = xForwardedFor[0].trim();
+  } else {
+    clientIp = req.ip || "unknown-ip";
+  }
+
+  const identifier = normalizedEmail || clientIp;
+
+  const now = Date.now();
+  const oneHourAgo = now - 60 * 60 * 1000;
+
+  let record = rateLimitDb.get(identifier);
+  if (!record) {
+    record = { timestamps: [] };
+    rateLimitDb.set(identifier, record);
+  }
+
+  // Filter out older timestamps
+  record.timestamps = record.timestamps.filter(t => t > oneHourAgo);
+
+  if (record.timestamps.length >= 10) {
+    const oldestTimestamp = record.timestamps[0];
+    const timeUntilResetMs = (oldestTimestamp + 60 * 60 * 1000) - now;
+    const minutesRemaining = Math.ceil(timeUntilResetMs / 1000 / 60);
+    return {
+      allowed: false,
+      errorMsg: `Rate limit exceeded. To protect server resources, guest requests using the shared server key are limited to 10 requests per hour. Please try again in ${minutesRemaining} minutes, or configure your own personal (free) Gemini API Key under Profile Settings -> AI Configuration for unlimited access!`
+    };
+  }
+
+  record.timestamps.push(now);
+  return { allowed: true };
+}
+
+/**
+ * Retrieves the appropriate Gemini API key for a request.
+ * - If the client sends a custom user-defined API key, we always use that.
+ * - Otherwise, we fall back to the server's shared API key (rate limited separately at endpoints).
+ */
+function getRequestApiKey(req: express.Request): string | null {
+  const userApiKey = req.headers["x-gemini-api-key"] as string || "";
+  const trimmed = userApiKey.trim();
+  
+  // A valid Gemini API key must start with AIzaSy and be at least 30 characters long
+  if (trimmed && trimmed.length >= 30 && trimmed.startsWith("AIzaSy")) {
+    return trimmed;
+  }
+
+  // All other users fall back to the server key (rate limited to 10/hour).
+  return process.env.GEMINI_API_KEY || process.env.API_KEY || null;
+}
+
 async function startServer() {
   const app = express();
+  app.set("trust proxy", true);
   const PORT = 3000;
   const now = new Date().toISOString();
   
@@ -77,13 +178,7 @@ async function startServer() {
 
   // API route to provide the Gemini API Key configuration state to the frontend
   app.get("/api/config", (req, res) => {
-    const apiKey = 
-      process.env.GEMINI_API_KEY || 
-      process.env.VITE_GEMINI_API_KEY || 
-      process.env.GOOGLE_API_KEY || 
-      process.env.API_KEY ||
-      "";
-    
+    const apiKey = getRequestApiKey(req);
     res.json({ 
       isConfigured: !!apiKey
     });
@@ -102,13 +197,18 @@ async function startServer() {
         isUS = false
       } = req.body;
 
-      const userApiKey = req.headers["x-gemini-api-key"] as string || "";
-      const apiKey = (userApiKey && userApiKey.length >= 10) 
-        ? userApiKey 
-        : process.env.GEMINI_API_KEY || process.env.API_KEY || "";
+      const apiKey = getRequestApiKey(req);
 
-      if (!apiKey || apiKey === "undefined" || apiKey.length < 10) {
-        return res.status(400).json({ error: "Gemini API Key is invalid or missing. Please check your project settings." });
+      if (!apiKey) {
+        return res.status(403).json({ 
+          error: "Gemini API configuration is missing. Please configure your own Gemini API Key under Settings -> AI Configuration in your Profile to use this feature." 
+        });
+      }
+
+      // Enforce rate limiting on server key usage (10 requests per hour for guest users)
+      const rateLimitResult = checkRateLimit(req);
+      if (!rateLimitResult.allowed) {
+        return res.status(429).json({ error: rateLimitResult.errorMsg });
       }
 
       const ai = new GoogleGenAI({ apiKey });
@@ -173,8 +273,8 @@ INVENTIVENESS & EXPLORATION:
         prompt += `\n\nADDITIONAL USER-SPECIFIC RULES (PRIORITIZE THESE):\n${customInstructions.trim()}`;
       }
 
-      const result = await callWithRetry(() => ai.models.generateContent({
-        model: "gemini-3.5-flash",
+      const result = await callWithRetry((modelName) => ai.models.generateContent({
+        model: modelName,
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -221,13 +321,18 @@ INVENTIVENESS & EXPLORATION:
   app.post("/api/parse-recipe", async (req, res) => {
     try {
       const { content, defaults, isUS = false } = req.body;
-      const userApiKey = req.headers["x-gemini-api-key"] as string || "";
-      const apiKey = (userApiKey && userApiKey.length >= 10) 
-        ? userApiKey 
-        : process.env.GEMINI_API_KEY || process.env.API_KEY || "";
+      const apiKey = getRequestApiKey(req);
 
-      if (!apiKey || apiKey === "undefined" || apiKey.length < 10) {
-        return res.status(400).json({ error: "Gemini API Key is invalid or missing. Please check your project settings." });
+      if (!apiKey) {
+        return res.status(403).json({ 
+          error: "Gemini API configuration is missing. Please configure your own Gemini API Key under Settings -> AI Configuration in your Profile to use this feature." 
+        });
+      }
+
+      // Enforce rate limiting on server key usage (10 requests per hour for guest users)
+      const rateLimitResult = checkRateLimit(req);
+      if (!rateLimitResult.allowed) {
+        return res.status(429).json({ error: rateLimitResult.errorMsg });
       }
 
       const ai = new GoogleGenAI({ apiKey });
@@ -277,8 +382,8 @@ INVENTIVENESS & EXPLORATION:
   Content to parse:
   ${content.substring(0, 15000)}`;
 
-      const result = await callWithRetry(() => ai.models.generateContent({
-        model: "gemini-3.5-flash",
+      const result = await callWithRetry((modelName) => ai.models.generateContent({
+        model: modelName,
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -327,13 +432,18 @@ INVENTIVENESS & EXPLORATION:
   app.post("/api/parse-invoice", async (req, res) => {
     try {
       const { content, isUS = false } = req.body;
-      const userApiKey = req.headers["x-gemini-api-key"] as string || "";
-      const apiKey = (userApiKey && userApiKey.length >= 10) 
-        ? userApiKey 
-        : process.env.GEMINI_API_KEY || process.env.API_KEY || "";
+      const apiKey = getRequestApiKey(req);
 
-      if (!apiKey || apiKey === "undefined" || apiKey.length < 10) {
-        return res.status(400).json({ error: "Gemini API Key is invalid or missing. Please check your project settings." });
+      if (!apiKey) {
+        return res.status(403).json({ 
+          error: "Gemini API configuration is missing. Please configure your own Gemini API Key under Settings -> AI Configuration in your Profile to use this feature." 
+        });
+      }
+
+      // Enforce rate limiting on server key usage (10 requests per hour for guest users)
+      const rateLimitResult = checkRateLimit(req);
+      if (!rateLimitResult.allowed) {
+        return res.status(429).json({ error: rateLimitResult.errorMsg });
       }
 
       const ai = new GoogleGenAI({ apiKey });
@@ -374,8 +484,8 @@ INVENTIVENESS & EXPLORATION:
   Content to parse:
   ${content.substring(0, 15000)}`;
 
-      const result = await callWithRetry(() => ai.models.generateContent({
-        model: "gemini-3.5-flash",
+      const result = await callWithRetry((modelName) => ai.models.generateContent({
+        model: modelName,
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -421,13 +531,18 @@ INVENTIVENESS & EXPLORATION:
   app.post("/api/get-substitutions", async (req, res) => {
     try {
       const { targetFlavor, targetPercentage, inventory = [], recipeName = "", allRecipeFlavors = [], isUS = false } = req.body;
-      const userApiKey = req.headers["x-gemini-api-key"] as string || "";
-      const apiKey = (userApiKey && userApiKey.length >= 10) 
-        ? userApiKey 
-        : process.env.GEMINI_API_KEY || process.env.API_KEY || "";
+      const apiKey = getRequestApiKey(req);
 
-      if (!apiKey || apiKey === "undefined" || apiKey.length < 10) {
-        return res.status(400).json({ error: "Gemini API Key is invalid or missing. Please check your project settings." });
+      if (!apiKey) {
+        return res.status(403).json({ 
+          error: "Gemini API configuration is missing. Please configure your own Gemini API Key under Settings -> AI Configuration in your Profile to use this feature." 
+        });
+      }
+
+      // Enforce rate limiting on server key usage (10 requests per hour for guest users)
+      const rateLimitResult = checkRateLimit(req);
+      if (!rateLimitResult.allowed) {
+        return res.status(429).json({ error: rateLimitResult.errorMsg });
       }
 
       const ai = new GoogleGenAI({ apiKey });
@@ -526,8 +641,8 @@ INVENTIVENESS & EXPLORATION:
   - If NO good substitutes exist in the stash, return an empty array.
   `;
 
-      const result = await callWithRetry(() => ai.models.generateContent({
-        model: "gemini-3.5-flash",
+      const result = await callWithRetry((modelName) => ai.models.generateContent({
+        model: modelName,
         contents: prompt,
         config: {
           responseMimeType: "application/json",

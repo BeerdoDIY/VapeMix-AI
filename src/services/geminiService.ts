@@ -1,3 +1,5 @@
+import { auth } from '../lib/firebase';
+
 export interface FeedbackRecipe {
   name: string;
   flavors: { name: string; percentage: number }[];
@@ -22,8 +24,18 @@ function getHeaders(userApiKey?: string): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json"
   };
-  if (userApiKey && userApiKey.trim().length >= 10) {
-    headers["x-gemini-api-key"] = userApiKey.trim();
+  const trimmed = userApiKey ? userApiKey.trim() : "";
+  // Valid Google/Gemini API keys must start with AIzaSy and be at least 30 chars long
+  if (trimmed && trimmed.length >= 30 && trimmed.startsWith("AIzaSy")) {
+    headers["x-gemini-api-key"] = trimmed;
+  }
+  try {
+    const email = auth.currentUser?.email;
+    if (email) {
+      headers["x-user-email"] = email.trim();
+    }
+  } catch (e) {
+    // Ignore error
   }
   return headers;
 }
