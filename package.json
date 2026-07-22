@@ -1,7 +1,7 @@
 {
   "name": "vapemix-ai",
   "private": true,
-  "version": "1.32.16",
+  "version": "1.32.17",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -40,7 +40,6 @@
     "@types/node": "^22.14.0",
     "@types/papaparse": "^5.5.2",
     "autoprefixer": "^10.4.21",
-    "firebase-admin": "^14.1.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

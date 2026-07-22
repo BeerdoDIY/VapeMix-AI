@@ -18,7 +18,7 @@ const __dirname = path.dirname(__filename);
  */
 async function callWithRetry<T>(
   apiCall: (model: string) => Promise<T>,
-  models: string[] = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-3.5-flash"],
+  models: string[] = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"],
   retries = 3,
   delayMs = 1200
 ): Promise<T> {
@@ -52,6 +52,18 @@ async function callWithRetry<T>(
         errorCode === 429 ||
         errorStatus === "RESOURCE_EXHAUSTED";
 
+      const isModelError =
+        errorMessage.includes("model") ||
+        errorMessage.includes("not found") ||
+        errorMessage.includes("NOT_FOUND") ||
+        errorMessage.includes("available") ||
+        stringifiedError.includes("model") ||
+        stringifiedError.includes("not found") ||
+        stringifiedError.includes("NOT_FOUND") ||
+        stringifiedError.includes("available") ||
+        errorCode === 404 ||
+        errorStatus === "NOT_FOUND";
+
       const isTransient = 
         isQuotaOrLimit ||
         errorMessage.includes("503") ||
@@ -62,20 +74,20 @@ async function callWithRetry<T>(
         errorCode === 503 ||
         errorStatus === "UNAVAILABLE";
 
-      // If we hit a quota or limit, and we have more fallback models, failover immediately
-      if (isQuotaOrLimit && modelIndex < models.length - 1) {
+      // If we hit a quota limit or model error (like 404 model not found), and we have more fallback models, failover immediately
+      if ((isQuotaOrLimit || isModelError) && modelIndex < models.length - 1) {
         modelIndex++;
         const nextModel = models[modelIndex];
-        console.warn(`[Server Gemini] Model ${currentModel} hit quota/rate limit. Falling back immediately to ${nextModel}...`);
+        console.info(`[Server Gemini] ${currentModel} is busy or unavailable. Switching to fallback ${nextModel}...`);
         attempt = 0; // Reset attempts for the new model
         continue;
       }
 
-      if (attempt >= retries || !isTransient) {
+      if (attempt >= retries || (!isTransient && !isModelError)) {
         throw error;
       }
 
-      console.warn(`[Server Gemini] Call failed with model ${currentModel} (attempt ${attempt}/${retries}). Retrying in ${delayMs}ms... Error:`, error);
+      console.info(`[Server Gemini] Retrying ${currentModel} (attempt ${attempt}/${retries}) in ${delayMs}ms...`);
       await new Promise(resolve => setTimeout(resolve, delayMs));
       delayMs *= 2; // Exponential backoff
     }
@@ -157,8 +169,7 @@ function getRequestApiKey(req: express.Request): string | null {
   const userApiKey = req.headers["x-gemini-api-key"] as string || "";
   const trimmed = userApiKey.trim();
   
-  // A valid Gemini API key must start with AIzaSy and be at least 30 characters long
-  if (trimmed && trimmed.length >= 30 && trimmed.startsWith("AIzaSy")) {
+  if (trimmed) {
     return trimmed;
   }
 

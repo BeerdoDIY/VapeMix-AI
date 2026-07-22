@@ -1,6 +1,6 @@
 import { initializeApp, setLogLevel as setAppLogLevel } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, getDocFromServer, setLogLevel as setFirestoreLogLevel } from 'firebase/firestore';
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, memoryLocalCache, doc, getDocFromServer, setLogLevel as setFirestoreLogLevel } from 'firebase/firestore';
 import { getAnalytics, isSupported, logEvent as firebaseLogEvent } from 'firebase/analytics';
 import firebaseConfig from '../../firebase-applet-config.json';
 import ReactGA from 'react-ga4';
@@ -40,9 +40,37 @@ if (typeof window !== 'undefined') {
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = initializeFirestore(app, {
-  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
-}, firebaseConfig.firestoreDatabaseId);
+// Safely resolve the Firestore database instance with a memory-only cache fallback
+// to prevent hangs or SecurityError exceptions in iframe/Safari environments.
+let dbInstance;
+try {
+  let cacheConfig;
+  try {
+    if (typeof window !== 'undefined' && window.indexedDB) {
+      // In some browsers/Safari inside iframes, accessing window.indexedDB can throw a SecurityError,
+      // or open() operations can be silently rejected/hang.
+      // We perform a brief open check to confirm whether database creation/access is blocked.
+      window.indexedDB.open('test-db-support');
+      cacheConfig = persistentLocalCache({ tabManager: persistentMultipleTabManager() });
+    } else {
+      cacheConfig = memoryLocalCache();
+    }
+  } catch (e) {
+    console.warn("Firestore persistent cache is not supported or accessible in this environment. Falling back to memory cache.", e);
+    cacheConfig = memoryLocalCache();
+  }
+
+  dbInstance = initializeFirestore(app, {
+    localCache: cacheConfig
+  }, firebaseConfig.firestoreDatabaseId);
+} catch (error) {
+  console.error("Failed to initialize Firestore with custom cache. Falling back to default memory initialization.", error);
+  dbInstance = initializeFirestore(app, {
+    localCache: memoryLocalCache()
+  }, firebaseConfig.firestoreDatabaseId);
+}
+
+export const db = dbInstance;
 export const googleProvider = new GoogleAuthProvider();
 
 /**

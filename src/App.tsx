@@ -57,10 +57,13 @@ import {
 import Papa from 'papaparse';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactGA from 'react-ga4';
-import * as pdfjsLib from 'pdfjs-dist';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { WorkerMessageHandler } from 'pdfjs-dist/legacy/build/pdf.worker.mjs';
 
-// Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+// Set up the PDF.js worker synchronously in the main thread (fake worker).
+// This avoids creating actual background Web Workers which are blocked by SecurityError exceptions
+// or Same-Origin sandbox rules inside iframes in certain browsers (such as Safari on iOS/Mac).
+(globalThis as any).pdfjsWorker = { WorkerMessageHandler };
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -836,7 +839,7 @@ function AppContent() {
   }, [activeTab, cookieConsent]);
 
   // Version
-  const VERSION = "1.32.16";
+  const VERSION = "1.32.17";
 
   // History Navigation Support
   useEffect(() => {
@@ -4248,6 +4251,14 @@ function DuplicateInventoryDialog({
 }
 
 const VERSION_HISTORY = [
+  {
+    version: "1.32.17",
+    date: "July 16, 2026",
+    changes: [
+      "PDF Worker Compatibility: Fixed a rendering/worker crash issue ('Invalid workerPort type') by updating the PDF.js initialization to bind WorkerMessageHandler globally, ensuring smooth offline PDF recipe importing.",
+      "Logger Refactoring: Improved server-side log output to use clean, low-noise informational logging during automated multi-model fallovers instead of warning alerts."
+    ]
+  },
   {
     version: "1.32.16",
     date: "July 9, 2026",

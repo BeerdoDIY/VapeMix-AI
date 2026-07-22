@@ -25,8 +25,7 @@ function getHeaders(userApiKey?: string): Record<string, string> {
     "Content-Type": "application/json"
   };
   const trimmed = userApiKey ? userApiKey.trim() : "";
-  // Valid Google/Gemini API keys must start with AIzaSy and be at least 30 chars long
-  if (trimmed && trimmed.length >= 30 && trimmed.startsWith("AIzaSy")) {
+  if (trimmed) {
     headers["x-gemini-api-key"] = trimmed;
   }
   try {
